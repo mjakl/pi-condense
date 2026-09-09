@@ -721,17 +721,17 @@ the resolved model differs from `ctx.model`):
 - **Enter:** a transient primary failure is retried once on the session model.
   If that succeeds, the session flips to fallback and a one-time warning fires.
 - **Sticky + probe:** while in fallback, all calls route to the session model.
-  After a 10-minute cooldown (`COOLDOWN_MS`, internal, not configurable) one
+  After a 3-minute cooldown (`COOLDOWN_MS`, internal, not configurable) one
   batch of the next flush probes the primary; success recovers (info notify),
   failure stays in fallback.
 - **In-memory only:** no `context-prune-*` entry; `reset()` on `session_start`.
   A restart mid-outage re-detects on the next flush.
 
 Cost note: the initial detection flush can fire up to N doomed primary calls
-before the outage is known; steady state is 0 doomed calls, plus exactly 1
-probe per 10 minutes. After the primary recovers, summarization keeps running
-on the (often pricier) session model for up to one cooldown before the probe
-switches back.
+before the outage is known; steady state is 0 doomed calls, plus at most 1
+probe per 3 minutes. Probing is on demand: after the cooldown, the next
+summarization call tests the primary. A successful probe switches back from
+the (often pricier) session model.
 
 ---
 

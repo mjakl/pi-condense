@@ -1,5 +1,8 @@
 # Summarizer outage fallback
 
+Current duration: the implemented re-probe cooldown is now **3 minutes**, still
+hardcoded and on demand. The 10-minute values below describe the original design.
+
 ## Context
 
 pi-condense summarizes completed tool-call batches with an LLM (`src/summarizer.ts`,

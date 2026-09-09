@@ -33,20 +33,20 @@ describe("chooseTarget", () => {
     expect(c.chooseTarget()).toEqual({ target: "primary", wasProbe: false });
   });
 
-  it("targets fallback while in fallback and before cooldown", () => {
+  it("targets fallback until one millisecond before three minutes", () => {
     const t = { now: 1_000_000 };
     const c = new FallbackController(clockAt(t));
     c.onPrimaryFailFallbackOk(false);
     expect(c.inFallback).toBe(true);
-    t.now += COOLDOWN_MS - 1;
+    t.now += 180_000 - 1;
     expect(c.chooseTarget()).toEqual({ target: "fallback", wasProbe: false });
   });
 
-  it("elects exactly one probe after cooldown elapses", () => {
+  it("elects exactly one probe at three minutes", () => {
     const t = { now: 0 };
     const c = new FallbackController(clockAt(t));
     c.onPrimaryFailFallbackOk(false); // enter, lastProbeAt = 0
-    t.now = COOLDOWN_MS;
+    t.now = 180_000;
     expect(c.chooseTarget()).toEqual({ target: "primary", wasProbe: true });
     expect(c.chooseTarget()).toEqual({ target: "fallback", wasProbe: false });
   });
@@ -139,7 +139,7 @@ describe("probe schedule survives steady-state fallback failures", () => {
     const c = new FallbackController(clockAt(t));
     c.onPrimaryFailFallbackOk(false); // enter, lastProbeAt = 0
     // fallback keeps failing every minute, well within the cooldown
-    for (let i = 1; i < 10; i++) {
+    for (let i = 1; i < 3; i++) {
       t.now = i * 60_000;
       expect(c.chooseTarget()).toEqual({ target: "fallback", wasProbe: false });
       c.onFallbackOnlyFail();
