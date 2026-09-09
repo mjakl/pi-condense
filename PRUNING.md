@@ -699,7 +699,6 @@ The last attempted prune boundary is persisted as `context-prune-frontier` so `f
 - **Configurable summarizer thinking (`summarizerThinking`):** trade summary cost / latency for quality (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`). `default` omits the option entirely so the provider chooses.
 - **Cumulative stats:** `context-prune-stats` entries track input/output tokens and cost of every summarizer call; full detail surfaces in `/pruner stats`. Cost is also emitted on the `cost:external` pi.events channel for external aggregators (cumulative per session, live only).
 - **Footer status:** literal `prune: on` when both `enabled` and `showPruneStatusLine` are true; otherwise nothing. No activity, counters, reclaim ratio, or diagnostics.
-- **Prune measurements:** `pruneMessages` still returns before/after character counts via `sizeMessages(messages) = JSON.stringify(messages).length`, covering all five phases (stub-replace, supersede, error-purge, chain-range-prune, orphan-sweep). These measurements are not shown in the footer.
 - **Live progress for `/pruner now`:** an `aboveEditor` widget shows one row per pending batch with braille spinner, streamed summary-char count, and ✓ / ⚠ status.
 
 ### Summarizer outage fallback
