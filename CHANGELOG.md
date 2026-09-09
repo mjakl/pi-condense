@@ -9,6 +9,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
+- Simplify the footer to literal `prune: on` when enabled and visible; show nothing when disabled or hidden. Remove footer dividers, activity labels, savings, and diagnostic counters without changing configuration or pruning behavior.
+
 - Preserve distinct protected read output across paginated, partial, and failed rereads. Supersession now requires successful `read` results with identical text-only content and the same normalized path; changed content, errors, nontext results, and other tools do not participate. Cache-floor cadence is unchanged.
 
 - Deliver automatic final-response and budget summaries to live context and session history once, without extra turns. Reconcile summaries missing from Pi's next-request snapshot before stubbing results; exclude compacted history. Archive originals before publishing an ordinary summary, and require an observed summary before ordinary archives may replace raw output or seed dedup. Failed/queued delivery leaves recoverable work discoverable across frontiers and reload; later bookkeeping failures do not duplicate a published summary.
