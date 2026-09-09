@@ -55,7 +55,7 @@ Repo-specific sources (the principle is in the shared core above); field names m
 
 - **Pi event/extension API:** `node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts` — `ExtensionAPI`, `ExtensionContext`, every `pi.on(...)` event payload, `appendEntry`, `setActiveTools`, `setWidget`, `sendMessage`.
 - **LLM message shapes:** `node_modules/@earendil-works/pi-ai/dist/types.d.ts` — `AssistantMessage`, `ToolResultMessage`, `ToolCall`, `UsageInfo`. Field names matter (`id` vs `toolCallId`, `arguments` vs `input`); the type files are authoritative.
-- **pi-ai's auto-repair behavior:** `node_modules/@earendil-works/pi-ai/dist/providers/transform-messages.js` — `insertSyntheticToolResults` injects `{ isError: true, "No result provided" }` for orphaned tool calls. Knowing this is the reason `src/pruner.ts` returns stub messages instead of deleting them.
+- **pi-ai's auto-repair behavior:** `node_modules/@earendil-works/pi-ai/dist/api/transform-messages.js` — `insertSyntheticToolResults` injects `{ isError: true, "No result provided" }` for orphaned tool calls. Knowing this is the reason `src/pruner.ts` returns stub messages instead of deleting them.
 - **Session entry layout:** `node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts` — `getBranch()` returns `SessionEntry[]` (wrapped messages), not `AgentMessage[]`.
 
 ## Routing
@@ -120,8 +120,8 @@ Custom session entry types written by the extension (NOT in LLM context unless n
 
 | customType | Written by | Purpose |
 |---|---|---|
-| `context-prune-index` | `indexer.addBatch`; also `indexer.backfillChainRecords` (uncovered-chain deterministic backfill, `src/chain-compressor.ts`) | One entry per summarized batch; rebuilds the in-memory `ToolCallRecord` map on `session_start`. A backfill-carrier entry additionally sets `backfilled: true` and carries `refs` (the allocated `t<N>` `SummaryToolCallRef[]`) - excluded from content-hash dedup canonical seeding on both the live path and `session_start` reconstruction (poisoned-canonical guard); `refs` are re-registered via `registerSummaryRefs` on reconstruction since backfilled chains have no summary message to derive aliases from |
-| `context-prune-summary` | `flushPending` (runtime: `pi.sendMessage` steer; session: `appendCustomMessageEntry`) | The summary message itself; IS in LLM context (replaces the pruned raw outputs) |
+| `context-prune-index` | `indexer.addBatch`; also `indexer.backfillChainRecords` (missing-occurrence archival for all eligible chains, `src/chain-compressor.ts`) | Archives original occurrences before summary publication; rebuilds the in-memory `ToolCallRecord` map on `session_start`. Ordinary archive presence alone does not authorize stubbing/dedup: matching observed summary messages establish completion. Archive-only work remains capturable across frontiers/reload. A backfill-carrier entry additionally sets `backfilled: true` and carries `refs` (the allocated `t<N>` `SummaryToolCallRef[]`) - excluded from content-hash dedup canonical seeding on both the live path and `session_start` reconstruction (poisoned-canonical guard); `refs` are re-registered via `registerSummaryRefs` on reconstruction since backfilled chains have no summary message to derive aliases from |
+| `context-prune-summary` | `flushPending` (`pi.sendMessage` with `triggerTurn: false`; Pi owns live delivery and persistence) | The summary message itself; IS in LLM context (replaces the pruned raw outputs) |
 | `context-prune-stats` | `statsAccum.persist` | Cumulative summarizer token/cost snapshot |
 | `context-prune-frontier` | `flushPending` | Last attempted prune boundary (advances even on `skipped-oversized` / `skipped-trivial` / `skipped-deduped`) |
 | `context-prune-dedup-alias` | `indexer.registerDuplicate` | One entry per content-hash dedup hit; rebuilt on `session_start` to repopulate `dedupAliasToOriginal` |

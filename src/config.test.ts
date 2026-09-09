@@ -35,6 +35,24 @@ async function writeContextPrune(overrides: Record<string, unknown>): Promise<vo
   await writeFile(settingsPath(), JSON.stringify({ contextPrune: overrides }));
 }
 
+describe("loadConfig nested defaults", () => {
+  for (const key of ["chainCompression", "purgeErrors"] as const) {
+    for (const [field, value] of Object.entries(DEFAULT_CONFIG[key])) {
+      it(`merges ${key}.${field} without dropping sibling defaults`, async () => {
+        const override = typeof value === "boolean" ? !value : 0;
+        await writeContextPrune({ [key]: { [field]: override } });
+        const config = await loadConfig();
+        expect(config[key]).toEqual({ ...DEFAULT_CONFIG[key], [field]: override });
+      });
+    }
+
+    it(`defaults an empty ${key} block`, async () => {
+      await writeContextPrune({ [key]: {} });
+      expect((await loadConfig())[key]).toEqual(DEFAULT_CONFIG[key]);
+    });
+  }
+});
+
 describe("loadConfig protectedPaths", () => {
   it("uses the defaults when unset", async () => {
     await writeContextPrune({});

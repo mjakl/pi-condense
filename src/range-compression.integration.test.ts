@@ -10,6 +10,17 @@ import { expectNoOrphanToolResults } from "./test-support.js";
 import { CUSTOM_TYPE_CHAIN, CUSTOM_TYPE_INDEX } from "./types.js";
 import type { ChainRange, ChainCompressionConfig } from "./types.js";
 
+function coveredMessages(protectedOutput = false): any[] {
+  return [
+    { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
+    { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200 },
+    { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "o1" }], timestamp: 210 },
+    { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: protectedOutput ? "todowrite" : "bash", arguments: {} }], timestamp: 300 },
+    { role: "toolResult", toolCallId: "tc2", toolName: protectedOutput ? "todowrite" : "bash", content: [{ type: "text", text: protectedOutput ? "PLAN-STATE-XYZ" : "o2" }], timestamp: 310 },
+    { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400 },
+  ];
+}
+
 const noopDiagnostics = { report: () => {} };
 const testBackfill = { spillThreshold: 1_000_000, spillPreviewBytes: 2048, sessionDir: "/tmp", sessionId: "s1" };
 
@@ -46,7 +57,7 @@ describe("range compression integration", () => {
         fuseInputs.push(text);
         return "FUSED COHESIVE SUMMARY";
       },
-      messages: [],
+      messages: coveredMessages(),
       diagnostics: noopDiagnostics,
       backfill: testBackfill,
     });
@@ -58,14 +69,7 @@ describe("range compression integration", () => {
     // Entry is now in the real registry (what the renderer reads).
     expect(indexer.getChainEntries()[0].rangeSummaryText).toBe("FUSED COHESIVE SUMMARY");
 
-    const messages: any[] = [
-      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "o1" }], isError: false, timestamp: 210 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "bash", arguments: {} }], timestamp: 300, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "o2" }], isError: false, timestamp: 310 },
-      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400, usage: {}, stopReason: "end_turn" },
-    ];
+    const messages = coveredMessages();
 
     const cc: ChainCompressionConfig = {
       enabled: true,
@@ -83,9 +87,9 @@ describe("range compression integration", () => {
     // Renderer used the fused summary, not the per-batch concatenation.
     expect(synthetic.content[0].text).toContain("FUSED COHESIVE SUMMARY");
     expect(synthetic.content[0].text).not.toContain("summary of batch 1");
-    expect(synthetic.content[0].text).toContain('tools="t1,t2"');
+    expect(synthetic.content[0].text).toContain(`tools="${compressedEntries[0].toolRefs.join(",")}"`);
 
-    // Middle tool turns + their results dropped; tool outputs still recoverable via the index entries (added below).
+    // The compressor archived these outputs before dropping their tool turns.
     expect(out.filter((m: any) => m.role === "toolResult")).toHaveLength(0);
   });
 
@@ -109,7 +113,7 @@ describe("range compression integration", () => {
       blockRefs,
       appendEntry: () => {},
       now: () => 999,
-      messages: [],
+      messages: coveredMessages(true),
       diagnostics: noopDiagnostics,
       backfill: testBackfill,
     });
@@ -118,14 +122,7 @@ describe("range compression integration", () => {
     // protectedToolCallIds round-trips through the real registry
     expect(indexer.getChainEntries()[0].protectedToolCallIds).toEqual(["tc2"]);
 
-    const messages: any[] = [
-      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "bash-result" }], isError: false, timestamp: 210 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "todowrite", arguments: {} }], timestamp: 300, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc2", toolName: "todowrite", content: [{ type: "text", text: "PLAN-STATE-XYZ" }], isError: false, timestamp: 310 },
-      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400, usage: {}, stopReason: "end_turn" },
-    ];
+    const messages = coveredMessages(true);
 
     const cc: ChainCompressionConfig = {
       enabled: true,
@@ -145,8 +142,7 @@ describe("range compression integration", () => {
     expect(synthetic.content[0].text).toContain("PLAN-STATE-XYZ");
     // Protected toolResult is no longer a standalone message
     expect(out.filter((m: any) => m.role === "toolResult")).toHaveLength(0);
-    // protected tool has no short ref in production → absent from the tools= attribute
-    expect(synthetic.content[0].text).not.toContain("t2");
+    expect(indexer.getToolRefsForToolCallIds([occKey("tc2", 310)])).toEqual([]);
   });
 
   test("path-protected output is relocated via detectChains predicate", async () => {
@@ -237,8 +233,7 @@ describe("range compression integration", () => {
     expect(synthetic.content[0].text).not.toContain("app-source-code");
     // No standalone toolResult messages remain
     expect(out.filter((m: any) => m.role === "toolResult")).toHaveLength(0);
-    // Protected tc2 has no short ref → absent from the tools= attribute
-    expect(synthetic.content[0].text).not.toContain("t2");
+    expect(indexer.getToolRefsForToolCallIds([occKey("tc2", 310)])).toEqual([]);
   });
 
   test("falls back to per-batch concat when fuseRange is absent", async () => {
@@ -257,19 +252,12 @@ describe("range compression integration", () => {
       blockRefs,
       appendEntry: () => {},
       now: () => 1,
-      messages: [],
+      messages: coveredMessages(),
       diagnostics: noopDiagnostics,
       backfill: testBackfill,
     });
 
-    const messages: any[] = [
-      { role: "user", content: [{ type: "text", text: "go" }], timestamp: 100 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", arguments: {} }], timestamp: 200, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "o1" }], isError: false, timestamp: 210 },
-      { role: "assistant", content: [{ type: "toolCall", id: "tc2", name: "bash", arguments: {} }], timestamp: 300, usage: {}, stopReason: "tool_use" },
-      { role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "o2" }], isError: false, timestamp: 310 },
-      { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 400, usage: {}, stopReason: "end_turn" },
-    ];
+    const messages = coveredMessages();
     const cc: ChainCompressionConfig = { enabled: true, rollingWindow: 0, stripFinalAssistantThinking: true, fuseRangeSummary: false };
     const { messages: out } = pruneMessages(messages, indexer, cc);
     const synthetic = out.find((m: any) => m.role === "user" && m.content?.[0]?.text?.startsWith("<compressed-chain"));

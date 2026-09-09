@@ -856,7 +856,7 @@ export function registerCommands(
         // ── /pruner on ──
         case "on": {
           currentConfig.value = { ...currentConfig.value, enabled: true };
-          saveConfig(currentConfig.value);
+          await saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning enabled.");
           setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
           break;
@@ -865,7 +865,7 @@ export function registerCommands(
         // ── /pruner off ──
         case "off": {
           currentConfig.value = { ...currentConfig.value, enabled: false };
-          saveConfig(currentConfig.value);
+          await saveConfig(currentConfig.value);
           ctx.ui.notify("Context pruning disabled.");
           setPruneStatusWidget(ctx, currentConfig.value, getLiveReclaim(), getDiagnosticCounts?.());
           break;

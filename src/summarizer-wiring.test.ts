@@ -1,14 +1,14 @@
 import { describe, it, expect, mock } from "bun:test";
 import * as actualCompat from "@earendil-works/pi-ai/compat";
 
-// Stub pi-ai's `stream` so runSummarization can be exercised without a network
+// Stub pi-ai's `streamSimple` so runSummarization can be exercised without a network
 // call. `streamImpl` is swapped per test to simulate primary/fallback outcomes.
 let streamImpl: (model: any, input?: any, opts?: any) => any = () => {
   throw new Error("streamImpl not set");
 };
 mock.module("@earendil-works/pi-ai/compat", () => ({
   ...actualCompat,
-  stream: (...args: any[]) => streamImpl(...args),
+  streamSimple: (...args: any[]) => streamImpl(...args),
 }));
 
 const { summarizeBatch } = await import("./summarizer.js");
@@ -48,7 +48,7 @@ function errStream(message: string) {
 }
 
 // Hangs until `opts.signal` (the combined caller+timeout signal runOnce
-// passes to stream()) aborts. With no signal it never settles.
+// passes to streamSimple()) aborts. With no signal it never settles.
 function hangingStream(opts: any) {
   const signal: AbortSignal | undefined = opts?.signal;
   const untilAbort = () =>
@@ -151,11 +151,16 @@ describe("runSummarization wiring — same-model no-op (legacy path)", () => {
 
 describe("runSummarization wiring — enter fallback", () => {
   it("primary transient + fallback ok: returns summary, one warning, no error notify, sticky", async () => {
-    streamImpl = (model) => (model.id === PRIMARY.id ? errStream("down") : okStream("- fallback summary"));
+    const efforts: unknown[] = [];
+    streamImpl = (model, _input, opts) => {
+      efforts.push(opts.reasoning);
+      return model.id === PRIMARY.id ? errStream("down") : okStream("- fallback summary");
+    };
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
     const controller = new FallbackController();
-    const r = await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
+    const r = await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "high" }, ctx, { controller });
+    expect(efforts).toEqual(["high", "high"]);
     expect(r?.summaryText).toBe("- fallback summary");
     expect(controller.inFallback).toBe(true);
     const warnings = notes.filter((n) => n.level === "warning");
@@ -208,7 +213,39 @@ describe("runSummarization wiring — both-down + deferred warning", () => {
   });
 });
 
+describe("runSummarization wiring — auth", () => {
+  it("does not stream or enter fallback when auth resolution fails", async () => {
+    let calls = 0;
+    streamImpl = () => { calls++; return okStream("- unexpected"); };
+    const notes: Note[] = [];
+    const ctx = makeCtx(notes);
+    ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: "missing credential" });
+    const controller = new FallbackController();
+    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect(calls).toBe(0);
+    expect(controller.inFallback).toBe(false);
+    expect(notes).toEqual([{ msg: "pruner: summarization failed: missing credential", level: "error" }]);
+  });
+});
+
 describe("runSummarization wiring — abort", () => {
+  it("cancels an active stream without retrying on the fallback", async () => {
+    const ac = new AbortController();
+    let calls = 0;
+    streamImpl = (_model, _input, opts) => {
+      calls++;
+      queueMicrotask(() => ac.abort());
+      return hangingStream(opts);
+    };
+    const notes: Note[] = [];
+    const controller = new FallbackController();
+    await expect(summarizeBatch(makeBatch(), distinctConfig, makeCtx(notes), {
+      controller, signal: ac.signal,
+    })).rejects.toThrow("aborted");
+    expect(calls).toBe(1);
+    expect(controller.inFallback).toBe(false);
+    expect(notes).toHaveLength(0);
+  });
   it("re-throws when the signal is already aborted", async () => {
     streamImpl = () => okStream("- never");
     const notes: Note[] = [];

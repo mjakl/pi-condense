@@ -39,6 +39,8 @@ function normalize(existing: Partial<ContextPruneConfig>): ContextPruneConfig {
   const merged = { ...DEFAULT_CONFIG, ...existing };
   return {
     ...merged,
+    chainCompression: { ...DEFAULT_CONFIG.chainCompression, ...existing.chainCompression },
+    purgeErrors: { ...DEFAULT_CONFIG.purgeErrors, ...existing.purgeErrors },
     enabled: typeof merged.enabled === "boolean" ? merged.enabled : DEFAULT_CONFIG.enabled,
     showPruneStatusLine:
       typeof merged.showPruneStatusLine === "boolean"

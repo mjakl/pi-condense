@@ -17,16 +17,9 @@ export function blobDirFor(sessionDir: string, sessionId: string): string {
 
 export function blobPathFor(sessionDir: string, sessionId: string, toolCallId: string): string {
   const base = sanitizeId(toolCallId);
-  // 255-byte basename cap (gh-14). Uncapped budget: 255 - ".txt" = 251.
-  // Capped: 234-byte prefix + "." + 16-hex sha1 + ".txt" = 255 exactly.
-  // sanitizeId output is ASCII, so slice counts bytes. The "." separator is
-  // unreachable by sanitizeId, keeping capped names disjoint from short-key
-  // names. The hash covers the UNsanitized key so ids that sanitize
-  // identically stay distinct.
-  const name =
-    Buffer.byteLength(base, "utf8") <= 251
-      ? `${base}.txt`
-      : `${base.slice(0, 234)}.${createHash("sha1").update(toolCallId).digest("hex").slice(0, 16)}.txt`;
+  // Hash every unsanitized key: even short keys can sanitize identically.
+  // ASCII prefix + "." + 16-hex hash + ".txt" stays within 255 bytes.
+  const name = `${base.slice(0, 234)}.${createHash("sha1").update(toolCallId).digest("hex").slice(0, 16)}.txt`;
   return join(blobDirFor(sessionDir, sessionId), name);
 }
 

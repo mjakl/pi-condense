@@ -1,5 +1,5 @@
-import { stream } from "@earendil-works/pi-ai/compat";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
   CapturedBatch,
@@ -28,17 +28,14 @@ const RANGE_SYSTEM_PROMPT = `You are fusing several per-step summaries of one CL
 - Keep any reference tokens like \`t12\` or \`b3\` intact.
 - Be concise: a short narrative or a few grouped bullets, not one bullet per step.`;
 
-export function summarizerThinkingOptions(config: ContextPruneConfig): Record<string, unknown> {
+export function summarizerThinkingOptions(config: ContextPruneConfig): Pick<SimpleStreamOptions, "reasoning"> {
   const level: SummarizerThinking = config.summarizerThinking;
   if (level === "default") {
     return {};
   }
 
-  // stream()/complete() accept provider-level options. For reasoning-capable providers,
-  // pi-ai adapters translate reasoningEffort into the provider-specific field.
-  // "off" intentionally sends no effort; adapters that support explicit disable
-  // handle that the same way as an absent effort, while preserving compatibility.
-  return { reasoningEffort: level === "off" ? undefined : level };
+  // streamSimple translates the level to each provider's effort or token budget.
+  return { reasoning: level === "off" ? undefined : level };
 }
 
 /**
@@ -162,7 +159,7 @@ async function runOnce(
 
     // Pass the combined signal so the underlying fetch is cancelled immediately
     // either when the user presses Esc, or when an idle/ceiling timeout fires.
-    const responseStream = stream(
+    const responseStream = streamSimple(
       effectiveModel,
       {
         messages: [

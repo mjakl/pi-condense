@@ -85,7 +85,7 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 | `context_tree_query` | The tool the model calls to recover a stubbed original by ref (`tN`) or `toolCallId`. A reused id returns every matching occurrence, not just one, including any that were content-deduplicated to an earlier record - see [PRUNING.md § Occurrence Identity](PRUNING.md#occurrence-identity) |
 | Batch vs chain | A batch is one flush's worth of tool calls; a chain is a longer closed sequence eligible for range compression |
 | Prune frontier | The last attempted prune boundary - advances even on a skip, so nothing is reconsidered twice |
-| Diagnostics (`diag u/m/o/b`) | A self-hiding status-line segment surfacing prune-time degradations: `u` = unresolved chain range, `m` = detection/render id mismatch (informational, does not change what's dropped), `o` = orphan tool-result sweep, `b` = a zero-coverage chain with nothing left to backfill (genuine span mismatch, see below). Each letter's count is omitted when zero; the whole segment disappears when all four are zero. Backing session entries are `context-prune-diagnostic` - see below |
+| Diagnostics (`diag u/m/o/b`) | A self-hiding status-line segment surfacing prune-time degradations: `u` = unresolved chain range, `m` = detection/render id mismatch (informational, does not change what's dropped), `o` = orphan tool-result sweep, `b` = an unresolved chain span or incomplete occurrence archive (see below). Each letter's count is omitted when zero; the whole segment disappears when all four are zero. Backing session entries are `context-prune-diagnostic` - see below |
 | Context metrics (`thinking`/`chain share`/`frontier gap`) | Open-cycle thinking tokens, largest-chain share, frontier gap - what the pruner cannot (yet) reclaim, notably in single-chain sessions. Shown on `/pruner status`, never on the footer. See below and [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) |
 | Prompt-cache interaction | Why batching (not per-turn pruning) is the default - see [PRUNING.md](PRUNING.md#how-prefix-caching-works) |
 | `cost:external` | The shared cost-reporting channel pi-condense emits on (see above) |
@@ -125,6 +125,12 @@ These are most informative for long single-chain sessions where Phase 3 (chain c
 ## Install
 
 Published to npm as [`pi-condense`](https://www.npmjs.com/package/pi-condense).
+
+Requires Node.js >=22.19.0 and `@earendil-works/pi-coding-agent` >=0.84.4.
+Pi 0.84.4 fixes non-turn custom-message delivery at tool boundaries; older hosts
+can insert summaries between calls and results or start unwanted turns.
+Development dependencies pin Pi 0.85.1; the full suite also passes on Pi 0.84.4.
+The existing `@sinclair/typebox` 0.34 ecosystem is retained.
 
 **User scope** (all repos under your pi profile):
 

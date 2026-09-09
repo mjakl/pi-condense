@@ -110,7 +110,7 @@ export function captureUnindexedBatchesFromSession(
   // This makes turnIndex stable across multiple prune cycles: pruning removes
   // ToolResultMessages from the context event but leaves AssistantMessages in the
   // session branch, so the count of all assistant messages never decreases and
-  // always matches Pi's own event.turnIndex numbering.
+  // is independent of Pi's event.turnIndex, which resets on each agent run.
   let turnCounter = 0;
 
   // userTurnGroup increments on every user message or eligible custom anchor seen

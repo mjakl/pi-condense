@@ -25,14 +25,16 @@ import { applySpill, blobDirFor, blobPathFor } from "./spill.js";
 export class ToolCallIndexer {
   /** occurrence key (`id@resultTimestamp`, or bare id for legacy) -> record */
   private index = new Map<string, ToolCallRecord>();
+  /** Ordinary archives (including spills), distinct from non-LLM chain backfills. */
+  private ordinaryArchives = new Set<string>();
   /** bare toolCallId -> its occurrence keys, in insertion order */
   private bareIdToKeys = new Map<string, string[]>();
   private aliasToToolCallId = new Map<string, string>();
   private toolCallIdToAlias = new Map<string, string>();
   private nextShortAliasNumber = 1;
   /**
-   * hash -> original occurrence key (or legacy bare id). Populated as
-   * records enter the indexer (`addBatch`) and on `reconstructFromSession`.
+   * hash -> completed ordinary summary or spill occurrence key (or legacy
+   * bare id). Archive-only records and chain backfills never seed dedup.
    * Drives the pre-flush dedup pass via `lookupByContent`.
    */
   private contentHashToOriginal = new Map<string, string>();
@@ -51,7 +53,7 @@ export class ToolCallIndexer {
    * Per-batch summary bodies for chain-compression summary text lookup.
    * Each entry maps a set of toolCallIds to the summary's markdown body.
    * Populated from CUSTOM_TYPE_SUMMARY entries at rebuild time and via
-   * `registerSummaryBody` after a successful flush.
+   * `registerSummaryBody` when a summary is observed in session/context messages.
    */
   private summaryBodies: Array<{ toolCallIds: string[]; text: string }> = [];
   /** Compressed chains, keyed on startUserTimestamp for O(1) dedup checks. */
@@ -63,6 +65,7 @@ export class ToolCallIndexer {
    */
   reconstructFromSession(ctx: ExtensionContext): void {
     this.index.clear();
+    this.ordinaryArchives.clear();
     this.bareIdToKeys.clear();
     this.aliasToToolCallId.clear();
     this.toolCallIdToAlias.clear();
@@ -84,15 +87,8 @@ export class ToolCallIndexer {
         if (data && Array.isArray(data.toolCalls)) {
           for (const toolCall of data.toolCalls) {
             const key = this.indexRecord(toolCall);
-            // First-seen wins so the contentHashToOriginal map matches what
-            // addBatch would have produced at append time. Backfilled records
-            // never seed this map (dedup poison guard - see backfillChainRecords).
-            if (!backfilled) {
-              const hash = toolCall.contentHash ?? hashToolResult(toolCall.toolName, toolCall.resultText);
-              if (!this.contentHashToOriginal.has(hash)) {
-                this.contentHashToOriginal.set(hash, key);
-              }
-            }
+            if (backfilled) this.ordinaryArchives.delete(key);
+            else this.ordinaryArchives.add(key);
           }
         }
         if (backfilled && Array.isArray(data.refs)) this.registerSummaryRefs(data.refs);
@@ -121,7 +117,7 @@ export class ToolCallIndexer {
       if (entry.type === "custom" && (entry as any).customType === CUSTOM_TYPE_CHAIN) {
         const data = (entry as any).data as ChainCompressionEntry;
         if (data?.blockId && typeof data.startUserTimestamp === "number") {
-          this.chainRegistry.set(data.startUserTimestamp, data);
+          this.registerChain(data);
         }
         continue;
       }
@@ -132,6 +128,10 @@ export class ToolCallIndexer {
           dedupAliasEntries.push(data);
         }
       }
+    }
+
+    for (const [key, record] of this.index) {
+      if (this.ordinaryArchives.has(key)) this.seedCompletedContent(key, record);
     }
 
     for (const data of dedupAliasEntries) {
@@ -162,10 +162,10 @@ export class ToolCallIndexer {
   }
 
   /**
-   * Returns true if the given occurrence key has been pruned - either
-   * because its full record is in the index, or because it has been
-   * registered as an alias of an already-indexed original via the
-   * content-hash dedup pass.
+   * Returns true when an occurrence may leave the raw context: an ordinary
+   * archive with an observed summary, a spill/backfill, a compressed chain
+   * member, or a persisted alias of a completed canonical. Ordinary archive
+   * presence alone is not completion; failed delivery must remain capturable.
    *
    * STRICT lookup: no bare-id uniquification happens here, unlike
    * `resolveToolCallId`/`getRecord`/`getRecordsForId`. A bare-id fallback
@@ -180,7 +180,12 @@ export class ToolCallIndexer {
    * treatment.
    */
   isSummarized(occurrenceKey: string): boolean {
-    return this.index.has(occurrenceKey) || this.dedupAliasToOriginal.has(occurrenceKey);
+    const record = this.index.get(occurrenceKey);
+    return (record !== undefined &&
+      (!this.ordinaryArchives.has(occurrenceKey) || Boolean(record.spillPath) || this.hasPerBatchSummaryCoveringAny([occurrenceKey]) ||
+        [...this.chainRegistry.values()].some((entry) =>
+          (entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds).includes(occurrenceKey)))) ||
+      this.dedupAliasToOriginal.has(occurrenceKey);
   }
 
   /**
@@ -375,11 +380,6 @@ export class ToolCallIndexer {
     appendEntry: (customType: string, data?: unknown) => void,
   ): void {
     if (newKey === originalKey) return;
-    this.dedupAliasToOriginal.set(newKey, originalKey);
-    const originalShortRef = this.toolCallIdToAlias.get(originalKey);
-    if (originalShortRef) {
-      this.toolCallIdToAlias.set(newKey, originalShortRef);
-    }
     const { toolCallId: newToolCallId, resultTimestamp: newResultTimestamp } = parseOccKey(newKey);
     const { toolCallId: originalToolCallId, resultTimestamp: originalResultTimestamp } = parseOccKey(originalKey);
     const payload: DedupAliasEntryData = {
@@ -389,17 +389,34 @@ export class ToolCallIndexer {
       ...(originalResultTimestamp !== undefined ? { originalResultTimestamp } : {}),
     };
     appendEntry(CUSTOM_TYPE_DEDUP_ALIAS, payload);
+    this.dedupAliasToOriginal.set(newKey, originalKey);
+    const originalShortRef = this.toolCallIdToAlias.get(originalKey);
+    if (originalShortRef) {
+      this.toolCallIdToAlias.set(newKey, originalShortRef);
+    }
   }
 
   /**
    * Stores summary body text keyed by the toolCallIds it covers.
-   * Called after a successful flush so `getPerBatchSummaryTextForToolCallIds`
-   * can serve chain summaries without re-scanning session entries.
+   * Called only for observed summary messages. Repeated observation is a no-op
+   * for body storage and makes newly archived members eligible for dedup.
    */
   registerSummaryBody(toolCallIds: string[], text: string): void {
-    if (text && toolCallIds.length > 0) {
+    if (!text || toolCallIds.length === 0) return;
+    if (!this.summaryBodies.some((s) => s.text === text &&
+      s.toolCallIds.length === toolCallIds.length && s.toolCallIds.every((key, i) => key === toolCallIds[i]))) {
       this.summaryBodies.push({ toolCallIds, text });
     }
+    for (const key of toolCallIds) {
+      const record = this.index.get(key);
+      if (record && this.ordinaryArchives.has(key)) this.seedCompletedContent(key, record);
+    }
+  }
+
+  private seedCompletedContent(key: string, record: ToolCallRecord): void {
+    if (!record.spillPath && !this.hasPerBatchSummaryCoveringAny([key])) return;
+    const hash = record.contentHash ?? hashToolResult(record.toolName, record.resultText);
+    if (!this.contentHashToOriginal.has(hash)) this.contentHashToOriginal.set(hash, key);
   }
 
   /** Returns true if at least one stored summary covers any of the given toolCallIds. */
@@ -483,6 +500,7 @@ export class ToolCallIndexer {
     const records: ToolCallRecord[] = [];
 
     for (const tc of batch.toolCalls) {
+      if (this.index.has(occKey(tc.toolCallId, tc.resultTimestamp))) continue;
       const record: ToolCallRecord = {
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
@@ -497,18 +515,17 @@ export class ToolCallIndexer {
         ...(tc.resultPreview !== undefined ? { resultPreview: tc.resultPreview } : {}),
         ...(tc.contentHash !== undefined ? { contentHash: tc.contentHash } : {}),
       };
-      const key = this.indexRecord(record);
       records.push(record);
-      // Populate the dedup hash map AFTER the record is indexed so a future
-      // flush can dedup against this record. First-seen wins to keep the
-      // canonical id stable across multiple identical entries.
-      const hash = record.contentHash ?? hashToolResult(record.toolName, record.resultText);
-      if (!this.contentHashToOriginal.has(hash)) {
-        this.contentHashToOriginal.set(hash, key);
-      }
     }
 
+    if (records.length === 0) return;
+    // Recovery and dedup eligibility must never outlive a failed archive write.
     appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
+    for (const record of records) {
+      const key = this.indexRecord(record);
+      this.ordinaryArchives.add(key);
+      this.seedCompletedContent(key, record);
+    }
   }
 
   /**
@@ -540,7 +557,9 @@ export class ToolCallIndexer {
     const { refs, nextIndex } = buildShortToolCallRefs(calls, this.nextShortAliasNumber);
     this.nextShortAliasNumber = nextIndex; // burned numbers on failure are acceptable (monotonic, opaque)
     opts.appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records, backfilled: true, refs } satisfies IndexEntryData);
-    for (const r of records) this.indexRecord(r);
+    for (const r of records) {
+      this.ordinaryArchives.delete(this.indexRecord(r));
+    }
     this.registerSummaryRefs(refs);
     return refs;
   }

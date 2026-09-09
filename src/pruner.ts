@@ -104,7 +104,7 @@ export function pruneMessages(
     const key = typeof msg.timestamp === "number" ? occKey(msg.toolCallId, msg.timestamp) : msg.toolCallId;
     const lookupKey = indexer.isSummarized(key)
       ? key
-      : indexer.hasLegacyBareRecord(msg.toolCallId)
+      : indexer.hasLegacyBareRecord(msg.toolCallId) && indexer.isSummarized(msg.toolCallId)
         ? msg.toolCallId
         : undefined;
     if (lookupKey === undefined) return msg;

@@ -100,6 +100,20 @@ export function resolveRange(
   return { startIndex, endIndex };
 }
 
+export function hasUnsafeProtectedOutput(
+  messages: any[],
+  range: { startIndex: number; endIndex: number },
+  protectedToolCallIds: string[] = [],
+): boolean {
+  const protectedIds = new Set(protectedToolCallIds);
+  for (let i = range.startIndex + 1; i < range.endIndex; i++) {
+    const msg = messages[i];
+    if (msg.role === "toolResult" && protectedIds.has(msg.toolCallId) &&
+      Array.isArray(msg.content) && msg.content.some((block: any) => block.type !== "text")) return true;
+  }
+  return false;
+}
+
 export function applyChainCompressions(
   messages: any[],
   chainEntries: ChainCompressionEntry[],
@@ -134,6 +148,8 @@ export function applyChainCompressions(
       );
       continue;
     }
+    // Persisted entries must obey the same text-only relocation limit as new decisions.
+    if (hasUnsafeProtectedOutput(messages, range, entry.protectedToolCallIds)) continue;
     resolved.push({ entry, ...range });
   }
 
