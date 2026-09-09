@@ -719,14 +719,17 @@ the resolved model differs from `ctx.model`):
   never trip the controller; a `transient` stream error / `stopReason: error`
   does. Aborts propagate unchanged.
 - **Enter:** retry initial transient primary failures up to 3 times (4 primary
-  attempts total), stopping early on success, auth failure, or unusable output.
-  After exhaustion, attempt the current session model once. Primary attempts
+  attempts total), waiting 3s, 9s, then 27s before the three retries (27s maximum).
+  The initial attempt is immediate. Stop early on success, auth failure, or
+  unusable output. After exhaustion, attempt the current session model once
+  immediately, without another delay. Primary attempts
   keep configured reasoning; fallback omits reasoning options (provider default,
   not session-selected reasoning). If fallback succeeds, the controller becomes
   sticky and a one-time warning fires. If it fails, stop this call and retain
   pending work for later triggers; the session is not paused.
-- **Attempt scope:** idle and maximum timeouts apply separately to each attempt.
-  Cancellation prevents subsequent attempts. Same-model and no-controller calls
+- **Attempt scope:** idle and maximum timeouts apply separately to each attempt,
+  not to retry waits. Cancellation interrupts waits and prevents subsequent
+  attempts. Same-model and no-controller calls
   retain their single-attempt behavior.
 - **Sticky + probe:** while in fallback, all calls route to the session model.
   After a 3-minute cooldown (`COOLDOWN_MS`, internal, not configurable) one

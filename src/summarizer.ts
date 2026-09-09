@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -316,7 +317,9 @@ async function runSummarization(
   let r = await runOnce(model, userMessage, decision.target === "primary" ? config : fallbackConfig, ctx, options);
   // Cooldown probes stay single-shot; only initial primary calls get retries.
   if (decision.target === "primary" && !decision.wasProbe) {
-    for (let retry = 0; retry < 3 && r.kind === "transient"; retry++) {
+    for (const delayMs of [3000, 9000, 27000]) {
+      if (r.kind !== "transient") break;
+      await delay(delayMs, undefined, { signal: options.signal });
       r = await runOnce(primary, userMessage, config, ctx, options);
     }
   }

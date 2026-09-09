@@ -9,7 +9,7 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
-- Retry initial transient summarizer failures up to 3 times (4 primary attempts), then attempt the distinct session model once with provider-default reasoning. Failed fallback calls retain pending work for later triggers. Sticky fallback, single-attempt cooldown probes, and same-model eligibility are unchanged; timeouts remain per attempt.
+- Retry initial transient summarizer failures up to 3 times (4 primary attempts), waiting 3s, 9s, then 27s (maximum) before retries. The initial attempt and the single distinct-session-model fallback are immediate; fallback uses provider-default reasoning. Cancellation interrupts retry waits. Failed fallback calls retain pending work for later triggers. Sticky fallback, single-attempt cooldown probes, and same-model eligibility are unchanged; timeouts remain per attempt.
 
 - Shorten the configured summarizer model's fallback re-probe cooldown from 10 minutes to 3 minutes. Probing remains on demand at the next summarization call after the cooldown; the duration remains internal and not configurable.
 

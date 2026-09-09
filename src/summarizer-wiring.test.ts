@@ -1,4 +1,26 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { setTimeout as nativeDelay } from "node:timers/promises";
+
+// Keep native cancellation semantics without waiting through the retry schedule.
+const realDelay = nativeDelay;
+const delays: number[] = [];
+let delayImpl: typeof nativeDelay = async (_ms, value, options) => {
+  options?.signal?.throwIfAborted();
+  return value!;
+};
+mock.module("node:timers/promises", () => ({
+  setTimeout: (...args: Parameters<typeof nativeDelay>) => {
+    delays.push(args[0]!);
+    return delayImpl(...args);
+  },
+}));
+beforeEach(() => {
+  delays.length = 0;
+  delayImpl = async (_ms, value, options) => {
+    options?.signal?.throwIfAborted();
+    return value!;
+  };
+});
 import * as actualCompat from "@earendil-works/pi-ai/compat";
 
 // Stub pi-ai's `streamSimple` so runSummarization can be exercised without a network
@@ -348,6 +370,70 @@ describe("runSummarization wiring — idle reset keeps a flowing stream alive", 
 
 
 describe("bounded primary retries", () => {
+  it("waits 3s, 9s, 27s before retries, with immediate initial and fallback attempts", async () => {
+    const events: Array<string | number> = [];
+    let release!: () => void;
+    let delayStarted!: () => void;
+    let waiting = new Promise<void>((resolve) => { delayStarted = resolve; });
+    delayImpl = async (ms, value) => {
+      events.push(ms!);
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      delayStarted();
+      await gate;
+      return value!;
+    };
+    streamImpl = (model) => {
+      events.push(model.id);
+      return model.id === PRIMARY.id ? errStream("down") : okStream("fallback");
+    };
+    const controller = new FallbackController();
+    const ctx = makeCtx([]);
+    const result = summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
+    const expected: Array<string | number> = [];
+    for (const ms of [3000, 9000, 27000]) {
+      await waiting;
+      expected.push(PRIMARY.id, ms);
+      expect(events).toEqual(expected);
+      waiting = new Promise<void>((resolve) => { delayStarted = resolve; });
+      release();
+    }
+    expect((await result)?.summaryText).toBe("fallback");
+    expect(events).toEqual([...expected, PRIMARY.id, SESSION.id]);
+    expect(delays).toEqual([3000, 9000, 27000]);
+    events.length = 0;
+    await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
+    expect(events).toEqual([SESSION.id]);
+    expect(delays).toEqual([3000, 9000, 27000]);
+  });
+
+  for (const cancelAt of [1, 2, 3]) {
+    it(`cancels during retry delay ${cancelAt} without further auth or requests`, async () => {
+      const ac = new AbortController();
+      let calls = 0;
+      let auths = 0;
+      const controller = new FallbackController();
+      const ctx = makeCtx([]);
+      ctx.modelRegistry.getProviderAuth = async () => { auths++; };
+      delayImpl = async (ms, value, options) => {
+        expect(options?.signal).toBe(ac.signal);
+        if (delays.length === cancelAt) {
+          const pending = realDelay(ms, value, options);
+          ac.abort();
+          return pending;
+        }
+        return value!;
+      };
+      streamImpl = () => { calls++; return errStream("down"); };
+      await expect(summarizeBatch(makeBatch(), distinctConfig, ctx, {
+        controller, signal: ac.signal,
+      })).rejects.toThrow();
+      expect(calls).toBe(cancelAt);
+      expect(auths).toBe(cancelAt);
+      expect(delays).toEqual([3000, 9000, 27000].slice(0, cancelAt));
+      expect(controller.inFallback).toBe(false);
+    });
+  }
+
   for (const successAt of [1, 2, 3, 4]) {
     it(`stops on primary success at attempt ${successAt}`, async () => {
       const seen: string[] = [];
@@ -360,6 +446,7 @@ describe("bounded primary retries", () => {
       expect((await summarizeBatch(makeBatch(), distinctConfig, makeCtx(notes), { controller }))?.summaryText)
         .toBe("- primary");
       expect(seen).toEqual(Array(successAt).fill(PRIMARY.id));
+      expect(delays).toEqual([3000, 9000, 27000].slice(0, successAt - 1));
       expect(controller.inFallback).toBe(false);
       expect(notes).toEqual([]);
     });
@@ -488,6 +575,7 @@ describe("bounded primary retries", () => {
     await Promise.all([1, 2].map(() => summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })));
     expect(seen.filter((id) => id === PRIMARY.id)).toHaveLength(1);
     expect(seen.filter((id) => id === SESSION.id)).toHaveLength(2);
+    expect(delays).toEqual([]);
     now += COOLDOWN_MS;
     seen.length = 0;
     streamImpl = (model) => { seen.push(model.id); return okStream("primary recovered"); };
