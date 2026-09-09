@@ -69,7 +69,7 @@ let streamImpl: (model: any, input?: any, opts?: any) => any = () => {
 
 mock.module("@earendil-works/pi-ai/compat", () => ({
   ...actualCompat,
-  stream: (...args: any[]) => streamImpl(...args),
+  streamSimple: (...args: any[]) => streamImpl(...args),
 }));
 
 type AppendedEntry = { type: string; data: unknown };
@@ -233,7 +233,9 @@ function bootExtension(
       handlers.set(name, fn);
     },
     appendEntry: options.piAppendEntry ? options.piAppendEntry(pushPi) : pushPi,
-    sendMessage() {},
+    sendMessage(message: any) {
+      sessionAppended.push({ type: message.customType, data: { content: message.content, details: message.details } });
+    },
     registerCommand(name: string, spec: { handler: (args: string, ctx: any) => Promise<void> }) {
       commands.set(name, spec.handler);
     },
@@ -247,6 +249,7 @@ function bootExtension(
   const ctx: any = {
     sessionManager: {
       getBranch: () => branch,
+      buildContextEntries: () => branch,
       appendCustomEntry: options.sessionAppendCustomEntry
         ? options.sessionAppendCustomEntry(pushSession)
         : (type: string, data?: unknown) => {
