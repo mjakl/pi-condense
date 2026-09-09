@@ -18,19 +18,19 @@ describe("sanitizeId", () => {
 });
 
 describe("blobDirFor / blobPathFor", () => {
-  it("builds <sessionDir>/<sessionId>-blobs/<id>.txt", () => {
+  it("builds a hashed filename under the session blob directory", () => {
     expect(blobDirFor("/s", "sid")).toBe(join("/s", "sid-blobs"));
-    expect(blobPathFor("/s", "sid", "tc1")).toBe(join("/s", "sid-blobs", "tc1.txt"));
+    expect(blobPathFor("/s", "sid", "tc1")).toMatch(/\/sid-blobs\/tc1\.[0-9a-f]{16}\.txt$/);
   });
 });
 
 describe("blobPathFor byte cap (gh-14)", () => {
   const nameBytes = (p: string) => Buffer.byteLength(basename(p), "utf8");
 
-  it("251-byte sanitized base keeps today's formula (AC5 boundary, just-under)", () => {
+  it("251-byte sanitized base reserves room for the hash", () => {
     const id = "a".repeat(251);
     const p = blobPathFor("/s", "sid", id);
-    expect(p).toBe(join("/s", "sid-blobs", `${id}.txt`));
+    expect(basename(p)).toMatch(/^a{234}\.[0-9a-f]{16}\.txt$/);
     expect(nameBytes(p)).toBe(255);
   });
 
@@ -79,11 +79,11 @@ describe("occurrence-keyed spill", () => {
     const a = blobPathFor("/tmp/s", "sess", occKey("bash_23", 1150));
     const b = blobPathFor("/tmp/s", "sess", occKey("bash_23", 3150));
     expect(a).not.toBe(b);
-    expect(a.endsWith("bash_23_1150.txt")).toBe(true);
+    expect(basename(a)).toMatch(/^bash_23_1150\.[0-9a-f]{16}\.txt$/);
   });
 
-  it("legacy bare-id sidecar path is unchanged", () => {
-    expect(blobPathFor("/tmp/s", "sess", "bash_23").endsWith("bash_23.txt")).toBe(true);
+  it("hashes short unsanitized occurrence keys to avoid collisions", () => {
+    expect(blobPathFor("/s", "sid", "a:b@123")).not.toBe(blobPathFor("/s", "sid", "a_b@123"));
   });
 
   it("registerDuplicate is called with occurrence keys on both sides", async () => {
@@ -112,13 +112,12 @@ describe("occurrence-keyed spill", () => {
   });
 });
 
-describe("G4/C4: legacy bare-id sidecar recovery", () => {
-  it("a pre-upgrade legacy record whose spillPath points at a bare-id-named sidecar still resolves through context_tree_query", async () => {
+describe("persisted sidecar recovery", () => {
+  it.each([undefined, 123])("recovers an existing unhashed archive with resultTimestamp=%s", async (resultTimestamp) => {
     const dir = await mkdtemp(join(tmpdir(), "spill-legacy-"));
     try {
-      // A pre-occurrence-key sidecar, written and named exactly the way a
-      // pre-upgrade session would have (bare id, no resultTimestamp suffix).
-      const sidecarPath = blobPathFor(dir, "sid", "bash_7");
+      const legacyName = resultTimestamp === undefined ? "bash_7.txt" : "bash_7_123.txt";
+      const sidecarPath = join(blobDirFor(dir, "sid"), legacyName);
       await mkdir(blobDirFor(dir, "sid"), { recursive: true });
       await writeFile(sidecarPath, "OLD SPILLED BODY".repeat(20));
 
@@ -129,6 +128,7 @@ describe("G4/C4: legacy bare-id sidecar recovery", () => {
           toolCalls: [
             {
               toolCallId: "bash_7",
+              resultTimestamp,
               toolName: "fetch",
               args: { url: "https://x" },
               resultText: "",
@@ -142,13 +142,9 @@ describe("G4/C4: legacy bare-id sidecar recovery", () => {
           ],
         },
       };
-      // No matching ToolResultMessage in the branch (a genuinely pre-upgrade,
-      // truncated session) - an index entry persisted without resultTimestamp
-      // stays bare-keyed (no migration), so its sidecar keeps its bare-id
-      // filename and still resolves via the persisted spillPath.
       const indexer = new ToolCallIndexer();
       indexer.reconstructFromSession({ sessionManager: { getBranch: () => [indexEntry] } } as any);
-      expect(indexer.hasLegacyBareRecord("bash_7")).toBe(true);
+      expect(indexer.hasLegacyBareRecord("bash_7")).toBe(resultTimestamp === undefined);
 
       let registered: any;
       registerQueryTool({ registerTool: (def: any) => (registered = def) } as any, indexer);
@@ -224,6 +220,29 @@ describe("spillOversizedBatch", () => {
       expect(rec1.spillPath).not.toBe(rec2.spillPath);
       expect(await readFile(rec1.spillPath!, "utf-8")).toBe("FIRST".repeat(20));
       expect(await readFile(rec2.spillPath!, "utf-8")).toBe("SECOND".repeat(20));
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("recovers colliding sanitized keys independently after reload", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spill-collision-"));
+    try {
+      const entries: any[] = [];
+      const batch = mkBatch(["a:b", "a_b"].map((toolCallId) => ({
+        toolCallId, toolName: "bash", args: {}, resultText: `${toolCallId} BODY `.repeat(20),
+        isError: false, resultTimestamp: 123,
+      })));
+      await spillOversizedBatch({ batch, indexer: new ToolCallIndexer(), config: cfg,
+        sessionDir: dir, sessionId: "sid",
+        appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),
+      });
+      const restored = new ToolCallIndexer();
+      restored.reconstructFromSession({ sessionManager: { getBranch: () => entries } } as any);
+      let query: any;
+      registerQueryTool({ registerTool: (def: any) => (query = def) } as any, restored);
+      for (const id of ["a:b", "a_b"]) {
+        const result = await query.execute("q", { toolCallIds: [occKey(id, 123)] }, undefined, undefined, undefined);
+        expect(result.content[0].text).toContain(`${id} BODY `.repeat(20));
+      }
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
