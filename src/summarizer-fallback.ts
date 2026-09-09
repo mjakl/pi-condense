@@ -13,7 +13,7 @@
  */
 
 /** Re-probe cooldown while in fallback. Internal; deliberately not configurable. */
-export const COOLDOWN_MS = 10 * 60 * 1000;
+export const COOLDOWN_MS = 3 * 60 * 1000;
 
 export type FallbackTransition = "enter" | "recover" | "none";
 export type CallTarget = "primary" | "fallback";

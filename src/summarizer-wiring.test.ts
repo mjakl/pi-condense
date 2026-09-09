@@ -179,7 +179,7 @@ describe("runSummarization wiring — enter fallback", () => {
     };
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
-    const controller = new FallbackController(); // real clock: cooldown (10m) will not elapse in-test
+    const controller = new FallbackController(); // real clock: cooldown (3m) will not elapse in-test
     await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller }); // enter
     seen.length = 0;
     notes.length = 0;

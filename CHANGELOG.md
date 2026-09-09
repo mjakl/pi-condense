@@ -9,6 +9,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
+- Shorten the configured summarizer model's fallback re-probe cooldown from 10 minutes to 3 minutes. Probing remains on demand at the next summarization call after the cooldown; the duration remains internal and not configurable.
+
 - Simplify the footer to literal `prune: on` when enabled and visible; show nothing when disabled or hidden. Remove footer dividers, activity labels, savings, and diagnostic counters without changing configuration or pruning behavior.
 
 - Preserve distinct protected read output across paginated, partial, and failed rereads. Supersession now requires successful `read` results with identical text-only content and the same normalized path; changed content, errors, nontext results, and other tools do not participate. Cache-floor cadence is unchanged.

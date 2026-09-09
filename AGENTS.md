@@ -99,7 +99,7 @@ src/
   pruner.ts                        # pruneMessages: composes stub-replace → supersede → error-purge → chain-range-prune → orphan-sweep
   commands.ts                      # /pruner subcommands, settings overlay, status widget
   summarizer.ts                    # LLM summarization calls (per-batch + range fusion via shared runSummarization)
-  summarizer-fallback.ts           # pure: sticky in-memory FallbackController for summarizer-model outages (transient-only, 10-min re-probe)
+  summarizer-fallback.ts           # pure: sticky in-memory FallbackController for summarizer-model outages (transient-only, 3-min re-probe)
   supersede.ts                     # pure: only identical successful protected text reads per args.path supersede older copies; existing cache-floor cadence applies
   context-metrics.ts               # pure: branch -> ContextMetricsSnapshot (open-cycle thinking, chain share, frontier gap)
   stats.ts                         # StatsAccumulator + formatting helpers
