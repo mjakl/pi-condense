@@ -3,7 +3,7 @@ import { expect, it } from "bun:test";
 it("sends high thinking through the real Anthropic adapter with resolved auth (offline)", async () => {
   // A fresh process keeps other tests' pi-ai module mocks out of this request-level proof.
   const child = Bun.spawn([process.execPath, "--eval", `
-    import { summarizeRange } from "./src/summarizer.ts";
+    import { summarizeRange, summarizeBatch } from "./src/summarizer.ts";
     import { DEFAULT_CONFIG } from "./src/types.ts";
     import { getModel } from "@earendil-works/pi-ai/compat";
     const requests = [];
@@ -38,15 +38,30 @@ it("sends high thinking through the real Anthropic adapter with resolved auth (o
         results.push(await summarizeRange("t1: read source", { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerThinking }, ctx));
       }
     }
-    console.log(JSON.stringify({ requests, results }));
+    const raw = "prefix ".repeat(500) + "DIAGNOSIS: src/actual.ts; clean up only after success";
+    const model = getModel("anthropic", "claude-sonnet-4-6");
+    const notices = [];
+    const ctx = { model, modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "offline-test-key", headers: { "x-test-auth": "resolved-header" } }),
+      getProviderAuth: async () => ({ auth: { baseUrl: "https://offline.invalid" } }),
+    }, ui: { notify: (message) => notices.push(message) } };
+    const batch = { turnIndex: 1, timestamp: 1, assistantText: "", toolCalls: [{ toolCallId: "long", toolName: "read", args: {}, resultText: raw, isError: false }] };
+    const fullResult = await summarizeBatch(batch, { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerThinking: "off" }, ctx);
+    const tooLarge = await summarizeBatch(batch, { ...DEFAULT_CONFIG, summarizerModel: "default" }, { ...ctx, model: { ...model, contextWindow: 100 } });
+    console.log(JSON.stringify({ requests, results, raw, fullResult, tooLarge, notices }));
   `], { cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
   ]);
   expect(stderr).toBe("");
   expect(exitCode).toBe(0);
-  const { requests, results } = JSON.parse(stdout);
-  expect(requests).toHaveLength(6);
+  const { requests, results, raw, fullResult, tooLarge, notices } = JSON.parse(stdout);
+  expect(requests).toHaveLength(7);
+  expect(JSON.stringify(requests[6].body)).toContain(raw);
+  expect(fullResult.summaryText).toBe("offline summary");
+  expect(tooLarge).toBeNull();
+  expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("originals retained");
   expect(results.every((result: any) => result?.summaryText === "offline summary")).toBe(true);
   expect(requests[0].body.thinking).toMatchObject({ type: "enabled", budget_tokens: 16384 });
   expect(requests[0].body.max_tokens).toBeGreaterThan(16384);

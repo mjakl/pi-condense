@@ -56,9 +56,10 @@ export function captureBatch(
     .join("\n")
     .trim();
 
-  // Collect tool calls, matching each to its result
+  // Text-only summarization cannot represent images; keep those results raw.
   const toolCalls: CapturedToolCall[] = content
-    .filter((block: any) => block.type === "toolCall")
+    .filter((block: any) => block.type === "toolCall" &&
+      !toolResults.find((result: any) => result.toolCallId === block.id)?.content?.some((c: any) => c.type !== "text"))
     .map((block: any) => {
       const match = toolResults.find((result: any) => result.toolCallId === block.id);
 
@@ -171,6 +172,7 @@ export function captureUnindexedBatchesFromSession(
       const entryTimestamp = projected[i].entry.timestamp;
       const ts = entryTimestamp ? new Date(entryTimestamp).getTime() : (msg.timestamp ?? Date.now());
       const batch = captureBatch(msg, results, currentTurnIndex, ts);
+      if (batch.toolCalls.length === 0) continue;
       batches.push({
         ...batch,
         toolCalls: batch.toolCalls.filter((tc) => readyIds.has(tc.toolCallId)),
@@ -195,14 +197,7 @@ export function serializeBatchForSummarizer(batch: CapturedBatch): string {
     const status = tc.isError ? "ERROR" : "OK";
     const argsJson = JSON.stringify(tc.args, null, 2);
 
-    let resultText = tc.resultText;
-    const MAX_CHARS = 2000;
-    if (resultText.length > MAX_CHARS) {
-      const remaining = resultText.length - MAX_CHARS;
-      resultText = resultText.slice(0, MAX_CHARS) + ` ...[${remaining} chars truncated]`;
-    }
-
-    return `[[${index + 1}:${tc.toolName}]] Tool: ${tc.toolName}(${argsJson})\nResult (${status}): ${resultText}`;
+    return `[[${index + 1}:${tc.toolName}]] Tool: ${tc.toolName}(${argsJson})\nResult (${status}): ${tc.resultText}`;
   });
 
   parts.push(toolParts.join("\n---\n"));

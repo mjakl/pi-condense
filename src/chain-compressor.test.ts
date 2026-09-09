@@ -1,5 +1,5 @@
 import { describe, expect, it, test } from "bun:test";
-import { selectEligible, compressEligible, extractChainRecords, buildDeterministicBody } from "./chain-compressor.js";
+import { selectEligible, compressEligible, extractChainRecords } from "./chain-compressor.js";
 import type { ChainCompressorIndexerDeps } from "./chain-compressor.js";
 import type { ChainRange, ChainCompressionEntry, ToolCallRecord } from "./types.js";
 import { CUSTOM_TYPE_CHAIN } from "./types.js";
@@ -175,10 +175,7 @@ describe("compressEligible", () => {
     expect(appended[0]).toEqual(entry);
   });
 
-  test("no coverage -> deterministic compression, not a permanent skip", async () => {
-    // Was: "skips chain with no summary and records reason". Per spec
-    // 2026-08-14, zero coverage now routes to the deterministic zero-LLM
-    // branch instead of a terminal skip.
+  test("no coverage retains originals without a chain entry", async () => {
     const chainMessages = [
       { role: "user", timestamp: 100, content: [{ type: "text", text: "u" }] },
       { role: "assistant", timestamp: 101, content: [{ type: "toolCall", id: "tc1", name: "bash", input: { cmd: "a" } }] },
@@ -199,10 +196,8 @@ describe("compressEligible", () => {
       diagnostics: { report: () => {} },
       backfill: { spillThreshold: 1_000_000, spillPreviewBytes: 2048, sessionDir: "/tmp", sessionId: "s1" },
     });
-    expect(result.skipped).toHaveLength(0);
-    expect(result.compressedEntries).toHaveLength(1);
-    expect(result.compressedEntries[0].bodySource).toBe("deterministic");
-    expect(result.compressedEntries[0].startUserTimestamp).toBe(100);
+    expect(result.skipped).toEqual([{ startUserTimestamp: 100, reason: "no-summary" }]);
+    expect(result.compressedEntries).toHaveLength(0);
   });
 
   test("reports already-compressed chains in skipped list", async () => {
@@ -418,7 +413,8 @@ describe("occurrence keys in compression", () => {
       ...fixture,
     };
     await compressEligible([chain as any], 0, deps as any);
-    expect(asked).toEqual([["bash_23@1150"], ["bash_23@1150"]]);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every(keys => keys.length === 1 && keys[0] === "bash_23@1150")).toBe(true);
   });
 
   test("persists droppedOccurrenceKeys alongside droppedToolCallIds", async () => {
@@ -568,82 +564,7 @@ describe("extractChainRecords", () => {
   });
 });
 
-describe("buildDeterministicBody", () => {
-  function record(overrides: Partial<ToolCallRecord>): ToolCallRecord {
-    return {
-      toolCallId: "x",
-      toolName: "bash",
-      args: {},
-      resultText: "",
-      isError: false,
-      turnIndex: -1,
-      timestamp: 0,
-      ...overrides,
-    };
-  }
-
-  test("full grammar pin", () => {
-    const records = [
-      record({ toolCallId: "a1", toolName: "bash", args: { cmd: "ls" }, resultText: "r1", timestamp: 1000, resultTimestamp: 1000 }),
-      record({ toolCallId: "a2", toolName: "bash", args: { cmd: "pwd" }, resultText: "r2", timestamp: 2000, resultTimestamp: 2000 }),
-      record({ toolCallId: "a3", toolName: "read", args: { path: "f" }, resultText: "r3", timestamp: 3000, resultTimestamp: 3000 }),
-    ];
-    const body = buildDeterministicBody(records, ["t1", "t2", "t3"]);
-    expect(body).toBe(
-      [
-        "Deterministic chain compression (no per-batch summary existed for this span; raw outputs recoverable via context_tree_query).",
-        "Calls: 3",
-        "Tools: bash x2, read x1",
-        `Span: ${new Date(1000).toISOString()} -> ${new Date(3000).toISOString()} (2s)`,
-        'First: bash {"cmd":"ls"}',
-        'Last: read {"path":"f"}',
-        "Refs: t1, t2, t3",
-      ].join("\n"),
-    );
-  });
-
-  test("sorts/spans by resultTimestamp when it differs from timestamp", () => {
-    // timestamp order is reversed vs resultTimestamp order; resultTimestamp must win.
-    const records = [
-      record({ toolCallId: "a1", toolName: "bash", args: { cmd: "ls" }, timestamp: 9000, resultTimestamp: 1000 }),
-      record({ toolCallId: "a2", toolName: "read", args: { path: "f" }, timestamp: 1000, resultTimestamp: 9000 }),
-    ];
-    const body = buildDeterministicBody(records, ["t1", "t2"]);
-    expect(body).toContain("First: bash ");
-    expect(body).toContain("Last: read ");
-    expect(body).toContain(`Span: ${new Date(1000).toISOString()} -> ${new Date(9000).toISOString()} (8s)`);
-  });
-
-  test("empty toolRefs falls back to bare toolCallIds for the Refs line", () => {
-    const records = [
-      record({ toolCallId: "a1", toolName: "bash", timestamp: 1000 }),
-      record({ toolCallId: "a2", toolName: "read", timestamp: 2000 }),
-    ];
-    const body = buildDeterministicBody(records, []);
-    expect(body).toContain("Refs: a1, a2");
-  });
-
-  test("300-char args excerpt is capped at 200 chars + '...'", () => {
-    const longArgs = { s: "a".repeat(300) };
-    const records = [record({ toolName: "bash", args: longArgs, timestamp: 0 })];
-    const body = buildDeterministicBody(records, ["t1"]);
-    const firstLine = body.split("\n").find((l) => l.startsWith("First: "))!;
-    const excerptText = firstLine.slice("First: bash ".length);
-    expect(excerptText).toHaveLength(203);
-    expect(excerptText.endsWith("...")).toBe(true);
-  });
-
-  test("empty-args chain still produces a non-empty body with Calls/Tools/Span lines", () => {
-    const records = [record({ toolName: "bash", args: {}, resultText: "", timestamp: 500 })];
-    const body = buildDeterministicBody(records, ["t1"]);
-    expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("Calls: 1");
-    expect(body).toContain("Tools: bash x1");
-    expect(body).toContain("Span:");
-  });
-});
-
-describe("compressEligible - deterministic zero-LLM branch", () => {
+describe("compressEligible - coverage and archival", () => {
   function chainMessages() {
     return [
       { role: "user", timestamp: 1000, content: [{ type: "text", text: "u" }] },
@@ -703,7 +624,7 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     return { deps, backfillCalls, registerChainCalls, appended };
   }
 
-  test("compresses an uncovered chain with a deterministic body", async () => {
+  test("retains an uncovered chain without archiving or fusing", async () => {
     let fuseCalled = false;
     const { deps, backfillCalls, registerChainCalls } = makeDeterministicDeps({
       fuseRange: async () => {
@@ -716,19 +637,13 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
       0,
       deps as any,
     );
-    expect(result.compressedEntries).toHaveLength(1);
-    const entry = result.compressedEntries[0];
-    expect(entry.bodySource).toBe("deterministic");
-    expect(entry.rangeSummaryText).toBeTruthy();
-    expect(entry.toolRefs).toEqual(["t1", "t2"]);
+    expect(result.compressedEntries).toHaveLength(0);
     expect(fuseCalled).toBe(false);
-    expect(backfillCalls).toHaveLength(1);
-    expect(backfillCalls[0].records).toHaveLength(1);
-    expect(backfillCalls[0].records.map((r) => r.toolCallId)).not.toContain("c2");
-    expect(registerChainCalls).toHaveLength(1);
+    expect(backfillCalls).toHaveLength(0);
+    expect(registerChainCalls).toHaveLength(0);
   });
 
-  test("custom-anchored uncovered chain still compresses deterministically and backfills", async () => {
+  test("custom-anchored uncovered chain also stays intact", async () => {
     const messages = [
       { role: "custom", customType: "pi-gauntlet-transition-recovery", timestamp: 1000 },
       { role: "assistant", timestamp: 1001, content: [{ type: "toolCall", id: "c1", name: "bash", input: { cmd: "a" } }] },
@@ -739,13 +654,11 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     ];
     const { deps, backfillCalls } = makeDeterministicDeps({ messages });
     const result = await compressEligible([uncoveredChain()], 0, deps as any);
-    expect(result.compressedEntries).toHaveLength(1);
-    expect(result.compressedEntries[0].bodySource).toBe("deterministic");
-    expect(result.compressedEntries[0].startUserTimestamp).toBe(1000);
-    expect(backfillCalls).toHaveLength(1);
+    expect(result.compressedEntries).toHaveLength(0);
+    expect(backfillCalls).toHaveLength(0);
   });
 
-  test("partial summary coverage archives the missing repeated-id occurrence", async () => {
+  test("full summary coverage archives the missing repeated-id occurrence", async () => {
     const messages = chainMessages();
     messages[3].content[0].id = "c1";
     messages[4].toolCallId = "c1";
@@ -764,7 +677,7 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(backfillCalls[0].records).toEqual([records[1]]);
   });
 
-  test("partially summarized repeated-id outputs remain recoverable after reload", async () => {
+  test("partial coverage of a reused id does not authorize a chain drop", async () => {
     const messages = chainMessages();
     messages[3].content[0].id = "c1";
     messages[4].toolCallId = "c1";
@@ -777,17 +690,15 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     await indexer.backfillChainRecords([records[0]], { ...deps.backfill, appendEntry });
     indexer.registerSummaryBody([occKey("c1", 1050)], "first output summary");
     const result = await compressEligible([chain], 0, { ...deps, indexer, appendEntry } as any);
-    expect(result.compressedEntries).toHaveLength(1);
-    expect(result.compressedEntries[0].toolRefs).toEqual(["t1", "t2"]);
+    expect(result.compressedEntries).toHaveLength(0);
     const reloaded = new ToolCallIndexer();
     reloaded.reconstructFromSession({ sessionManager: { getBranch: () => persisted } } as any);
     expect(reloaded.getRecord("t1")?.resultText).toBe("out1");
-    expect(reloaded.getRecord("t2")?.resultText).toBe("out2");
-    expect(reloaded.getRecord("t2")?.args).toEqual({ path: "x" });
+    expect(reloaded.getRecord("t2")).toBeUndefined();
     expect(reloaded.getChainEntries()).toEqual(result.compressedEntries);
   });
 
-  test("failed ordinary indexing is backfilled before partial-chain compression and survives reload", async () => {
+  test("failed indexing without summary coverage does not authorize a chain drop", async () => {
     const messages = chainMessages();
     messages[3].content[0].id = "c1";
     messages[4].toolCallId = "c1";
@@ -807,13 +718,11 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
 
     const { deps } = makeDeterministicDeps({ messages });
     const result = await compressEligible([chain], 0, { ...deps, indexer, appendEntry } as any);
-    expect(result.compressedEntries).toHaveLength(1);
+    expect(result.compressedEntries).toHaveLength(0);
     const reloaded = new ToolCallIndexer();
     reloaded.reconstructFromSession({ sessionManager: { getBranch: () => persisted } } as any);
     expect(reloaded.getRecord(occKey("c1", 1050))?.resultText).toBe("out1");
-    expect(reloaded.getRecord(occKey("c1", 1150))?.resultText).toBe("out2");
-    expect(reloaded.getRecord(occKey("c1", 1150))?.args).toEqual({ path: "x" });
-    expect(result.compressedEntries[0].toolRefs.map((ref) => reloaded.getRecord(ref)?.resultText)).toContain("out2");
+    expect(reloaded.getRecord(occKey("c1", 1150))).toBeUndefined();
     expect(reloaded.getChainEntries()).toEqual(result.compressedEntries);
   });
 
@@ -890,7 +799,7 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(appended).toHaveLength(0);
   });
 
-  test("retry discriminator: members already indexed, nothing new extracted -> composes from index", async () => {
+  test("archived members without observed summaries remain uncompressed", async () => {
     const indexed: ToolCallRecord = {
       toolCallId: "c1",
       toolName: "bash",
@@ -921,8 +830,7 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     };
     const { deps, backfillCalls } = makeDeterministicDeps({ indexRecords: index });
     const result = await compressEligible([chainWithOccKeys], 0, deps as any);
-    expect(result.compressedEntries).toHaveLength(1);
-    expect(result.compressedEntries[0].bodySource).toBe("deterministic");
+    expect(result.compressedEntries).toHaveLength(0);
     expect(backfillCalls).toHaveLength(0);
   });
 
@@ -959,7 +867,7 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(reports).toHaveLength(0);
   });
 
-  test("empty-args chain compresses with a non-empty deterministic body", async () => {
+  test("trivial output without summary coverage stays intact", async () => {
     const messages = [
       { role: "user", timestamp: 1000, content: [{ type: "text", text: "u" }] },
       { role: "assistant", timestamp: 1001, content: [{ type: "toolCall", id: "c1", name: "bash", input: {} }] },
@@ -974,10 +882,6 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     };
     const { deps } = makeDeterministicDeps({ messages });
     const result = await compressEligible([chain], 0, deps as any);
-    expect(result.compressedEntries).toHaveLength(1);
-    const body = result.compressedEntries[0].rangeSummaryText!;
-    expect(body).toContain("Calls: 1");
-    expect(body).toContain("Tools: bash x1");
-    expect(body.length).toBeGreaterThan(0);
+    expect(result.compressedEntries).toHaveLength(0);
   });
 });

@@ -146,37 +146,6 @@ export function extractChainRecords(
   return records;
 }
 
-const EXCERPT_CAP = 200;
-function excerpt(args: unknown): string {
-  const s = JSON.stringify(args) ?? "";
-  return s.length <= EXCERPT_CAP ? s : s.slice(0, EXCERPT_CAP) + "...";
-}
-
-/** Deterministic zero-LLM body. Grammar pinned by tests - change both together. */
-export function buildDeterministicBody(records: ToolCallRecord[], refs: string[]): string {
-  const counts = new Map<string, number>();
-  for (const r of records) counts.set(r.toolName, (counts.get(r.toolName) ?? 0) + 1);
-  const histogram = [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([name, n]) => `${name} x${n}`)
-    .join(", ");
-  const at = (r: ToolCallRecord) => r.resultTimestamp ?? r.timestamp;
-  const sorted = [...records].sort((a, b) => at(a) - at(b));
-  const first = sorted[0];
-  const last = sorted[sorted.length - 1];
-  const seconds = Math.round((at(last) - at(first)) / 1000);
-  const refsLine = refs.length > 0 ? refs.join(", ") : records.map((r) => r.toolCallId).join(", ");
-  return [
-    "Deterministic chain compression (no per-batch summary existed for this span; raw outputs recoverable via context_tree_query).",
-    `Calls: ${records.length}`,
-    `Tools: ${histogram}`,
-    `Span: ${new Date(at(first)).toISOString()} -> ${new Date(at(last)).toISOString()} (${seconds}s)`,
-    `First: ${first.toolName} ${excerpt(first.args)}`,
-    `Last: ${last.toolName} ${excerpt(last.args)}`,
-    `Refs: ${refsLine}`,
-  ].join("\n");
-}
-
 export interface CompressEligibleResult {
   compressedEntries: ChainCompressionEntry[];
   skipped: Array<{ startUserTimestamp: number; reason: "no-summary" | "already-compressed" }>;
@@ -224,8 +193,20 @@ export async function compressEligible(
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;
     }
-    // A summary can cover only part of the span. Every other occurrence still
-    // needs a durable recovery record before the positional drop is authorized.
+    // An archive is not a summary. Failed, unsupported, and trivial outputs
+    // must stay verbatim rather than disappearing into a metadata-only chain.
+    const protectedForCoverage = new Set(chain.protectedToolCallIds ?? []);
+    const uncovered = deps.messages.slice(range.startIndex + 1, range.endIndex).some((msg) =>
+      msg.role === "toolResult" && !protectedForCoverage.has(msg.toolCallId) &&
+      (msg.content?.some((c: any) => c.type !== "text") ||
+        !deps.indexer.hasPerBatchSummaryCoveringAny([occKey(msg.toolCallId, resultTimestampOf(msg.timestamp))])),
+    );
+    if (uncovered || !deps.indexer.hasPerBatchSummaryCoveringAny(lookupKeys)) {
+      skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
+      continue;
+    }
+
+    // Every occurrence also needs a durable recovery record.
     const index = deps.indexer.getIndex();
     const fresh = extractChainRecords(deps.messages, chain, (k) => index.has(k));
     const freshKeys = new Set(fresh.map((r) => occKey(r.toolCallId, r.resultTimestamp)));
@@ -240,51 +221,12 @@ export async function compressEligible(
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;
     }
-    const indexed = lookupKeys.flatMap((key) => {
-      const record = index.get(key);
-      return record ? [record] : [];
-    });
     try {
       if (fresh.length > 0) {
         await deps.indexer.backfillChainRecords(fresh, { ...deps.backfill, appendEntry: deps.appendEntry });
       }
     } catch {
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
-      continue;
-    }
-
-    if (!deps.indexer.hasPerBatchSummaryCoveringAny(lookupKeys)) {
-      if (fresh.length === 0 && indexed.length === 0) {
-        const fullyProtected =
-          chain.middleToolCallIds.length > 0 && chain.middleToolCallIds.every((id) => protectedIds.has(id));
-        if (!fullyProtected) {
-          // Genuine span mismatch - nothing extractable, nothing durable.
-          deps.diagnostics.report(
-            "backfill-empty",
-            String(chain.startUserTimestamp),
-            `middles=${chain.middleToolCallIds.length}`,
-          );
-        }
-        skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
-        continue;
-      }
-      const allRecords = [...indexed, ...fresh];
-      const toolRefs = deps.indexer.getToolRefsForToolCallIds(lookupKeys);
-      const entry: ChainCompressionEntry = {
-        blockId: deps.blockRefs.issue(),
-        startUserTimestamp: chain.startUserTimestamp,
-        droppedToolCallIds: chain.middleToolCallIds,
-        finalAssistantTimestamp: chain.finalAssistantTimestamp,
-        toolRefs,
-        compressedAt: deps.now(),
-        rangeSummaryText: buildDeterministicBody(allRecords, toolRefs),
-        bodySource: "deterministic",
-        ...(chain.protectedToolCallIds?.length ? { protectedToolCallIds: chain.protectedToolCallIds } : {}),
-        ...(chain.middleOccurrenceKeys?.length ? { droppedOccurrenceKeys: chain.middleOccurrenceKeys } : {}),
-      };
-      deps.appendEntry(CUSTOM_TYPE_CHAIN, entry);
-      deps.indexer.registerChain(entry);
-      compressedEntries.push(entry);
       continue;
     }
 

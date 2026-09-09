@@ -188,7 +188,7 @@ graph TB
 - Ordinary publication is archive-first: persist original records, then call `pi.sendMessage`. An ordinary index entry alone does not permit stubbing or content-hash dedup. Completion comes from observing a summary message with matching occurrence refs. An archive whose delivery failed or was interrupted remains recoverable and capturable, including across a persisted frontier and reload. Existing spill, backfill, chain, and dedup records retain their non-LLM replacement semantics. Repeated archive writes for the same occurrence are skipped; no retry journal or persisted generated-text queue is introduced.
 - Every summary uses `pi.sendMessage(..., { triggerTurn: false })`: Pi appends it to live state and persists it once at the completed tool boundary, without starting a turn (requires Pi >=0.84.4). The next request may have snapshotted messages before that delivery drained, so the `context` hook adds missing summaries from `buildContextEntries()` before pruning. Content equality deduplicates live/reloaded summaries; the active-entry boundary prevents resurrection of compacted summaries.
 - The session JSONL file retains the original tool-result entries unchanged — pruning only affects what the *next* request sees in active context.
-- **Recovery grace window (`recoveryGraceTurns`, default 3):** after the model recovers a tool call via `context_tree_query`, that tool call's output is rendered **verbatim** (not re-stubbed) for the next N user-turn-groups, then reverts to the normal stub. Without this, the pruner re-prunes its own recovery output on the very next flush, forcing the model into a retrieve -> re-stub -> re-query loop ("fighting the pruner") whenever it keeps referencing the same recovered data across a few turns.
+- **Permanent recovery protection:** `context_tree_query` output never enters lossy tool-output summarization or re-stubbing. Chain compression relocates its text verbatim, including for historical chain entries without protection metadata. `recoveryGraceTurns` (default 3) still defers structural chain compression during the grace window; expiry no longer removes verbatim protection. The query tool's explicit response-size limit is unchanged.
   - Enforced at **render time**, in Phase 1 stub-replace and in chain-compression eligibility — NOT at capture time. Capture-time exclusion would collide with frontier trim: a tool call already past the frontier is dropped forever, so excluding a recovered call from capture would either need to resurrect frontier state or degrade the lifetime bound into permanent verbatim retention for anything ever recovered.
   - Trade-off: this bounds but does not eliminate regrowth. A tool call still referenced after its grace window expires is re-stubbed and may be re-queried again — the accepted cost of keeping the window's context-growth impact bounded instead of unbounded.
 
@@ -562,7 +562,7 @@ graph LR
 
 ## Pre-flush Pipeline & Safeguards
 
-`flushPending` runs a deterministic pipeline BEFORE any summarizer LLM call. Each step is configurable and each one can drop a batch entirely, in which case the prune frontier still advances so the same tool calls are not reconsidered next flush.
+`flushPending` filters protected and unsupported non-text results, deduplicates completed outputs, and skips trivial batches before calling the summarizer. Only completed summaries, deduplication and trivial skips advance the frontier. Failed, length-truncated, estimated-over-budget or oversized summaries retain originals and leave the rejected batch pending.
 
 ```
 captured batches (from turn_end or session scan)
@@ -573,10 +573,9 @@ captured batches (from turn_end or session scan)
   │     tool calls whose toolName is in protectedTools, OR whose args.path
   │     matches any protectedPaths glob, never enter the batch
   │
-  ├─ 2. Eager single-result spill     (config: spillThreshold, default 65536)
-  │     turn_end: single result >= spillThreshold chars → write sidecar;
-  │     index immediately via addBatch (no LLM); pruner emits file-pointer stub;
-  │     dedup precedence: protected → dedup → spill (duplicate → alias, no second file)
+  ├─ 2. Recovery/non-text exclusion
+  │     context_tree_query and results containing non-text blocks stay verbatim;
+  │     no eager spill or replacement with a preview
   │
   ├─ 3. Frontier trim                 (drop tool calls already past the frontier)
   │
@@ -591,10 +590,10 @@ captured batches (from turn_end or session scan)
   ├─ 6. Summarizer LLM call           (parallel: one call per batch)
   │     resolveModel + summarizeBatch / summarizeBatches
   │
-  └─ 7. Oversized post-check          (summary >= raw? → skip; advance frontier)
+  └─ 7. Oversized post-check          (decorated summary > raw? retain; no frontier advance)
 ```
 
-The outcome label written into `context-prune-frontier` is one of `summarized`, `skipped-deduped`, `skipped-trivial`, or `skipped-oversized` so the audit trail captures *why* a range was passed over.
+New frontier outcomes are `summarized`, `skipped-deduped`, or `skipped-trivial`. Historical `skipped-oversized` entries remain readable. The summarizer receives all captured text. Pi's context-token estimate rejects inputs already at or above the selected model's `contextWindow`; Pi clamps the output budget, and provider rejection or length-limited output also fails open. The estimate is not exact tokenization.
 
 ### Stub-replace instead of delete
 
@@ -633,25 +632,13 @@ Glob contract: full-path match against the raw `args.path` string with `\` norma
 
 Names and patterns that don't match any captured tool call are silently ignored.
 
-### Eager single-result spill
+### Archival spill compatibility
 
-`spillThreshold: number` (default `65536`) is a capture-time safeguard for outsized single tool results (e.g. a 1 MB web fetch, a full binary diff). When a single `ToolResultMessage`'s `resultText.length` reaches the threshold, the result is spilled immediately at `turn_end` — before the pending-queue trim and before any LLM call.
+New tool results are no longer eagerly spilled and replaced by previews before summarization. Large text follows the full-input summary path; rejection leaves it inline.
 
-**Sidecar location:** `<sessionDir>/<sessionId>-blobs/<sanitizedToolCallId>.txt`. When that basename would exceed 255 bytes (very long provider tool-call ids), it is capped to exactly 255 bytes as `<first 234 bytes of the sanitized key>.<16-hex sha1 of the unsanitized occurrence key>.txt`; names that already fit are unchanged.
+`spillThreshold` (default `65536`) and `spillPreviewBytes` still control sidecar storage when backfilling missing archives for summary-covered chains. Historical spilled records remain readable. Sidecars use `<sessionDir>/<sessionId>-blobs/<first 234 sanitized characters>.<16-hex sha1 of the occurrence key>.txt`, capped at 255 filename bytes.
 
-**Index entry:** `addBatch` is called synchronously with the spilled body (no LLM round-trip). The record is immediately `isSummarized = true`; the pruner emits a mechanical file-pointer stub:
-
-```
-[Spilled: <toolName> (<N> bytes). Head preview:
-<first spillPreviewBytes bytes>
-Full output: <sidecar path>. Use context_tree_query(<shortRef>) to retrieve.]
-```
-
-**Dedup precedence:** `protected → dedup → spill`. An oversized result that is also a content-hash duplicate of a prior record is aliased to the original; no second sidecar is written.
-
-**Atomicity:** the sidecar is written first; only on success is the in-memory record mutated. A write failure leaves the result inline for the normal flush and is logged via `console.error` — no data is lost.
-
-**Hybrid storage:** bodies below `spillThreshold` stay inline in the `context-prune-index` session entry (portable, as before); only oversized bodies are spilled. Moving the session `.jsonl` without its `-blobs/` directory loses only the giant-blob recovery path; the stub and head preview remain in the index entry.
+Keep the session's `-blobs/` directory when moving its JSONL. Without it, historical spilled bodies cannot be recovered; only the stored head preview remains.
 
 ### Trivial-batch skip (minBatchChars)
 
@@ -982,24 +969,15 @@ The `context-prune-chain` session entry carries the matching `protectedToolCallI
 
 **Rejected alternative:** skip compression for any chain that contains a protected tool. Rejected because `todowrite`/`todoread` recur in most chains for opted-in users, so this strategy would forfeit most chain compression for the people who most need `protectedTools`.
 
-### Deterministic fallback (uncovered chains)
+### Summary coverage before chain compression
 
-A chain becomes eligible for compression (closed, older than the rolling window) independently of whether its middle tool calls were ever summarized. Per-batch coverage can be zero - a trivial batch, an oversized-skip, a fully-deduped batch, or a plain capture miss - and historically that meant `compressEligible` skipped the chain forever with `reason: "no-summary"`: the prune frontier had already advanced past the span, so no future flush would recapture it. A 639-call, ~935k-char chain stranded live this way (`doc/specs/2026-08-14-uncovered-chain-deterministic-backfill.md`).
+Every unprotected tool-result occurrence in a new chain drop must have observed per-batch summary coverage. Archives alone, partial coverage, dedup aliases without direct summary coverage, and trivial skips do not authorize a drop. Such chains remain uncompressed with `reason: "no-summary"`, on both automatic flush and `/pruner compact`. Unsupported non-text output also prevents compression.
 
-When `hasPerBatchSummaryCoveringAny` is false for a chain's middle ids, `compressEligible` takes a second, zero-LLM branch instead of skipping:
+Covered chains still archive every missing unprotected occurrence before the positional drop. `extractChainRecords` matches calls and results within the resolved span; missing timestamps or incomplete extraction fail closed with `backfill-empty`. `backfillChainRecords` allocates recovery refs and appends the archive before committing it in memory. Large archival bodies may use sidecars. Backfilled records do not seed content-hash deduplication canonicals.
 
-Archival steps 1 and 2 run for **every eligible chain**, including spans with partial per-batch coverage. Every unprotected occurrence must have a durable record before the positional drop; missing timestamps or incomplete extraction fail closed with `backfill-empty`. Only the deterministic body in step 3 requires zero summary coverage.
+A chain append failure can leave a durable archive. Retry reuses it, but still requires observed summary coverage after reload. Fully protected zero-coverage chains stay uncompressed without a diagnostic.
 
-1. **Resolve + extract.** `extractChainRecords` resolves the chain's span with the same `resolveRange` used by the drop path, then walks it positionally. Middles are excluded when protected (relocated verbatim at render, never phase-1 stubbed) or already indexed (occurrence-key membership in the indexer's record map - not `isSummarized`, which also covers dedup aliases and would wrongly re-strand a fully-deduped chain). Each surviving call becomes a `ToolCallRecord` with `turnIndex: -1` (no batch turn; `context_tree_query` renders `Turn: -1`, a pinned cosmetic).
-2. **Backfill, atomically.** `indexer.backfillChainRecords` spills oversized results via the shared spill helpers (`blobPathFor`/`applySpill`), a fail-closed variant of the eager `spillOversizedBatch` path, allocates `t<N>` refs, and appends **one** `context-prune-index` entry carrying the records plus `backfilled: true` and the allocated refs - append-before-commit, so refs are durable the instant the records are. Only after the append succeeds does it commit to the in-memory index and alias maps. Backfilled records never seed `contentHashToOriginal`: a poisoned dedup canonical could point future identical outputs at a record whose durability was never actually verified end-to-end for that purpose, so backfilled entries are excluded from canonical-seeding on both the live path and `reconstructFromSession`.
-3. **Compose a deterministic body.** `buildDeterministicBody` builds a zero-LLM stub - call count, a tool-name histogram, span duration, and a `First:`/`Last:` line with args JSON capped at 200 chars, plus the `t<N>` refs - and stores it as `rangeSummaryText` on the `context-prune-chain` entry with `bodySource: "deterministic"`. The renderer already prefers `entry.rangeSummaryText` (`src/pruner.ts`), so no renderer change was needed; entries without `bodySource` keep today's semantics unchanged.
-4. **Fail closed.** Any throw during backfill (spill I/O, append failure, malformed span) preserves the historical `no-summary` skip - nothing partial is committed. A chain with zero freshly-extracted records is only treated as a genuine span mismatch (fail-closed skip + `backfill-empty` diagnostic) when it ALSO has zero members already present in the index; if a prior attempt's index append succeeded but the chain-entry append then failed, the retry composes and persists straight from the durable index records instead of re-extracting, so recovery never produces a second `context-prune-index` entry for the same span.
-
-**Fully-protected exception.** If every middle id in a zero-extractable, zero-indexed chain is protected (`chain.protectedToolCallIds` covers all of `chain.middleToolCallIds`), the chain stays on the plain `no-summary` skip with no `backfill-empty` diagnostic. Compressing would relocate every output verbatim into the synthetic body anyway (zero tokens saved), and the diagnostic would misreport a healthy span - firing on every restart for protected-heavy configs.
-
-**Known limitation.** `flushPending` returns early when there are no pending batches, before chain detection runs at all. A chain stranded in an otherwise-idle session is not healed by `/pruner now` on an empty queue - it heals on the next flush that has any work, or immediately via `/pruner compact`.
-
-**Cache-prefix impact.** Same as any chain compression: rewriting the span busts the prefix cache from that chain's start-user-message onward, once. The deterministic body has no `now()` or LLM nondeterminism, so it renders byte-identical on every subsequent pass - no repeated invalidation from retries or reloads.
+Historical entries with `bodySource: "deterministic"` remain readable. New entries never replace unsummarized outputs with metadata-only bodies. This deliberately saves fewer tokens to preserve evidence. The earlier design is recorded in `doc/specs/2026-08-14-uncovered-chain-deterministic-backfill.md`; the current contract is `doc/specs/2026-09-10-full-result-quality.md`.
 
 ### Deferred
 
@@ -1139,7 +1117,7 @@ Prune-time degradations - an unresolvable chain range, a detection/render id mis
 | `unresolved-range` | `applyChainCompressions` | A persisted chain entry's boundaries didn't resolve to a unique range (or the range was rejected as nested/duplicate) - the entry compressed nothing |
 | `range-id-mismatch` | `applyChainCompressions` | The ids actually inside a resolved range don't match the entry's recorded `droppedToolCallIds` - informational only, the range still wins |
 | `orphan-sweep` | `pruneMessages` (Phase 4) | One or more `toolResult` messages were removed for having no open matching `toolCall` |
-| `backfill-empty` | `chain-compressor.compressEligible` | An eligible chain has an unresolved span, missing occurrence timestamps, incomplete archive coverage, or zero extractable/indexed unprotected records - a genuine archival gap, not a partial-failure retry state. Fully-protected zero-coverage chains skip silently instead (see [Deterministic fallback § Fully-protected exception](#deterministic-fallback-uncovered-chains)). Deduped per chain start timestamp (`chain.startUserTimestamp`). |
+| `backfill-empty` | `chain-compressor.compressEligible` | An eligible chain has an unresolved span, missing occurrence timestamps, incomplete archive coverage, or zero extractable/indexed unprotected records - a genuine archival gap, not a partial-failure retry state. Fully-protected zero-coverage chains skip silently instead (see [Summary coverage before chain compression](#summary-coverage-before-chain-compression)). Deduped per chain start timestamp (`chain.startUserTimestamp`). |
 
 **Never in LLM context.** These are session entries only - zero tokens added, zero cache-prefix change, never read back into the message array the model sees.
 

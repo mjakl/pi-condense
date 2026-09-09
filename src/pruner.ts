@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import type { ToolCallIndexer } from "./indexer.js";
-import type { ChainCompressionConfig, ErrorPurgeConfig } from "./types.js";
+import { QUERY_TOOL_NAME, type ChainCompressionConfig, type ErrorPurgeConfig } from "./types.js";
 import { isProtected, type ProtectionConfig } from "./protected.js";
 import { applyChainCompressions } from "./chain-range-prune.js";
 import { purgeErroredArgs } from "./error-purge.js";
-import { inGraceRecoveryToolCallIds } from "./recovery-grace.js";
 import { occKey } from "./occurrence-key.js";
 import { sweepOrphanToolResults } from "./orphan-sweep.js";
 import type { DiagnosticSink } from "./diagnostics.js";
@@ -68,15 +67,15 @@ export function pruneMessages(
   chainCompression?: ChainCompressionConfig,
   errorPurge?: ErrorPurgeConfig,
   protection?: ProtectionConfig,
-  recoveryGraceTurns: number = 0,
+  _recoveryGraceTurns: number = 0,
   diagnostics?: DiagnosticSink,
   supersede?: { state: SupersedeState; isProtected: (toolName: string, args: unknown) => boolean },
 ): { messages: any[]; pruned: boolean } {
   // Phase 1: stub-replace summarized tool results
   let pruned = false;
-  const inGrace = inGraceRecoveryToolCallIds(messages, recoveryGraceTurns);
   const next = messages.map((msg) => {
-    if (msg.role !== "toolResult") return msg;
+    if (msg.role !== "toolResult" || msg.toolName === QUERY_TOOL_NAME ||
+      msg.content?.some((c: any) => c.type !== "text")) return msg;
 
     // Fail-closed: when the message carries a timestamp, the occurrence key
     // is tried first. The bare id is consulted only as a fallback, and only
@@ -100,9 +99,6 @@ export function pruneMessages(
     // Dedup aliases resolve to the original record, so an alias whose own
     // path is protected but whose original isn't stays stubbed (edge case).
     if (protection && record && isProtected(record.toolName, record.args, protection)) {
-      return msg;
-    }
-    if (inGrace.has(key)) {
       return msg;
     }
     pruned = true;

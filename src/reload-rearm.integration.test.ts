@@ -293,6 +293,66 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
   return harness;
 }
 
+describe("full-result quality", () => {
+  it.each(["error", "length", "oversized", "budget"])("%s retains large originals through automatic/manual compression and reload", async mode => {
+    const previous = streamImpl;
+    const raw = "body ".repeat(30_000) + "TAIL: exact diagnosis and cleanup condition";
+    const branch = closedChainBranch(1);
+    branch[2].message.content[0].text = raw;
+    const inputs: string[] = [];
+    streamImpl = (_model, input) => {
+      inputs.push(input.messages[0].content[0].text);
+      if (mode === "error") return errStream("provider rejected input");
+      return { async *[Symbol.asyncIterator]() {}, async result() {
+        return { stopReason: mode === "length" ? "length" : "stop", content: [{ type: "text", text: mode === "oversized" ? raw + "longer" : "partial" }], usage: USAGE };
+      } };
+    };
+    try {
+      const h = await boot({ branch, chainCompressionEnabled: true, rollingWindow: 0 });
+      if (mode === "budget") h.ctx.model.contextWindow = 100;
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.handlers.get("turn_end")!({ message: branch[1].message, toolResults: [branch[2].message], turnIndex: 0 }, h.ctx);
+      const finish = { message: branch[3].message };
+      await h.handlers.get("message_end")!(finish, h.ctx);
+      expect(h.appended.filter(e => ["context-prune-summary", "context-prune-frontier", "context-prune-chain", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      if (mode !== "budget") expect(inputs.every(text => text.includes(raw))).toBe(true);
+      else expect(inputs).toHaveLength(0);
+      await h.commands.get("pruner")!("compact", h.ctx);
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.commands.get("pruner")!("compact", h.ctx);
+      const messages = branch.filter(e => e.type === "message").map(e => e.message);
+      const rendered = await h.handlers.get("context")!({ messages }, h.ctx);
+      expect((rendered?.messages ?? messages).find((m: any) => m.role === "toolResult").content[0].text).toBe(raw);
+      expect(h.appended.filter(e => e.type === "context-prune-chain")).toHaveLength(0);
+      // No completed frontier hides the rejected batch from a later successful flush.
+      delete h.ctx.model.contextWindow;
+      streamImpl = () => okStream();
+      await h.handlers.get("message_end")!(finish, h.ctx);
+      expect(h.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(1);
+    } finally { streamImpl = previous; }
+  });
+
+  it("recovery and non-text results never enter the text summarizer", async () => {
+    const previous = streamImpl;
+    const branch = closedChainBranch(2);
+    branch[1].message.content[0].name = "context_tree_query";
+    branch[2].message.toolName = "context_tree_query";
+    branch[6].message.content.push({ type: "image", data: "AA==", mimeType: "image/png" });
+    let calls = 0;
+    streamImpl = () => { calls++; return okStream(); };
+    try {
+      const h = await boot({ branch, chainCompressionEnabled: true, rollingWindow: 0 });
+      await h.handlers.get("session_start")!({}, h.ctx);
+      for (const offset of [0, 4]) {
+        await h.handlers.get("turn_end")!({ message: branch[offset + 1].message, toolResults: [branch[offset + 2].message], turnIndex: offset }, h.ctx);
+      }
+      await h.commands.get("pruner")!("compact", h.ctx);
+      expect(calls).toBe(0);
+      expect(h.appended.filter(e => e.type === "context-prune-chain" || e.type === "context-prune-index")).toHaveLength(0);
+    } finally { streamImpl = previous; }
+  });
+});
+
 describe("summary publication failures", () => {
   const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
   const flush = (h: Awaited<ReturnType<typeof boot>>) => h.handlers.get("message_end")!(finish, h.ctx);
@@ -1344,7 +1404,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
-  it("a skipped-oversized batch (summary longer than raw) sets no floor", async () => {
+  it("an oversized summary retains raw output without a frontier or floor", async () => {
     const branch: any[] = [];
     const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
 
@@ -1371,8 +1431,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
 
     expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
     const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
-    expect(frontierEntries.length).toBe(1);
-    expect((frontierEntries[0].data as any).outcome).toBe("skipped-oversized");
+    expect(frontierEntries).toHaveLength(0);
+    expect(toolResultText(await render(branch, handlers, ctx), "bash1")).toBe("x");
 
     const rendered = await render(branch, handlers, ctx);
     expect(toolResultText(rendered, "r1")).toBe("protected content");

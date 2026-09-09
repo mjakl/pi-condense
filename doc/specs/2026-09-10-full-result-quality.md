@@ -6,8 +6,8 @@ Quality takes priority over compression. The summarizer receives the complete ca
 
 ## Design
 
-- Remove the serializer's per-result truncation. Keep the existing provider failure and unusable-output handling; do not add retries or arbitrary size cutoffs. Check available model-budget support before implementation.
-- Treat oversized summaries as failures, restoring the batch and later batches through the existing failure path.
+- Remove the serializer's per-result truncation. Keep the existing provider failure and unusable-output handling; do not add retries or arbitrary size cutoffs. Use Pi's exported `estimateTokens` on the complete summarizer message against the selected model's `contextWindow`. Pi reserves/clamps output itself; token estimates are not exact.
+- Treat oversized summaries as failures, restoring the batch and later batches through the existing failure path. Remove eager result spilling from capture because its preview-only replacement bypassed summarization entirely. Keep archival spill helpers and historical spill recovery.
 - Require observed per-batch summary coverage for every unprotected occurrence before authorizing a new chain drop. An archive alone is not summary coverage. This also retains trivial unsummarized outputs instead of reducing them to deterministic metadata. Continue reading historical chain entries.
 - Always protect `context_tree_query`, regardless of user protection settings. Reuse verbatim protected-output relocation for chains, including historical chain entries that did not record recovery protection.
 - Preserve unsupported non-text tool results rather than summarizing their text portion alone.

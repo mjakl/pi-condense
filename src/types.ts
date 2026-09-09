@@ -202,7 +202,7 @@ export const MIN_BATCH_CHARS_PRESETS: { value: string; label: string }[] = [
 /**
  * Cycling presets for the `recoveryGraceTurns` setting in the SettingsList.
  * Stored as strings; converted to number when applied. "0" disables the grace
- * (recovery output stubs immediately, pre-feature behavior).
+ * (structural chain deferral only; recovery text remains verbatim).
  */
 export const RECOVERY_GRACE_PRESETS: { value: string; label: string }[] = [
   { value: "0", label: "0 (disabled)" },
@@ -280,12 +280,8 @@ export interface ContextPruneConfig {
    */
   batchingMode: BatchingMode;
   /**
-   * Suppress the UI notification emitted when a batch is skipped — for either
-   * reason: (a) the summary would have been larger than the raw tool-result
-   * text (oversized), or (b) the batch was below `minBatchChars` and never
-   * sent to the summarizer (trivial). The frontier still advances in both
-   * cases; only the notification is silenced. Useful for sessions dominated
-   * by small tool calls where one or both fire on nearly every turn.
+   * Legacy setting name: suppress trivial/dedup skip notifications.
+   * Rejected summaries retain originals and warn regardless of this setting.
    */
   quietOversizedSkips: boolean;
   /**
@@ -309,11 +305,9 @@ export interface ContextPruneConfig {
    */
   minBatchChars: number;
   /**
-   * User-turn-groups a `context_tree_query` (recovery) output stays verbatim in
-   * context after recovery, before it reverts to the normal stub. Bounds the
-   * retrieve->re-stub->re-query loop without permanent retention. 0 disables
-   * (recovery output stubs immediately). Enforced at render time in pruner.ts
-   * (Phase 1) and chain-compressor.ts (eligibility), not at capture.
+   * User-turn-groups to defer structural compression of a recovery chain.
+   * Recovery text stays verbatim permanently, including after relocation.
+   * 0 disables only the structural deferral.
    */
   recoveryGraceTurns: number;
   /**
@@ -402,7 +396,7 @@ export interface ContextPruneConfig {
    * values (<= 0 or > 1) normalize to null.
    */
   autoBudgetThreshold: number | null;
-  /** Min chars (resultText.length) for a single tool result to spill to a sidecar file. */
+  /** Sidecar threshold for missing archives of summary-covered chains, not eager capture. */
   spillThreshold: number;
   /** Head-preview size in bytes kept inline as resultPreview on a spilled record. */
   spillPreviewBytes: number;

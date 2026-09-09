@@ -49,7 +49,6 @@ import { createSupersedeState, earliestChainStart, earliestResultTimestamp, lowe
 import { detectChains, withClosingMessage } from "./src/chain-detector.js";
 import { inGraceRecoveryToolCallIds } from "./src/recovery-grace.js";
 import { shouldBudgetFlush, shouldDeltaFlush, shouldFrontierGapFlush, usageFraction } from "./src/budget.js";
-import { spillOversizedBatch } from "./src/spill.js";
 import { occKey } from "./src/occurrence-key.js";
 import { DiagnosticSink } from "./src/diagnostics.js";
 
@@ -459,7 +458,6 @@ export default function (pi: ExtensionAPI) {
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       let totalDedupedCount = 0;
-      const oversizedBatches: CapturedBatch[] = [];
       const trivialBatches: CapturedBatch[] = [];
       const dedupedBatches: CapturedBatch[] = [];
       let firstFailureIndex = -1;
@@ -514,9 +512,12 @@ export default function (pi: ExtensionAPI) {
         const toolNames = batch.toolCalls.map((tc) => tc.toolName);
         const decorated = substituteInlineRefs(result.summaryText, summaryRefs, toolNames);
         const summaryText = decorated + formatSummaryToolCallRefs(summaryRefs);
-        const shouldSkipOversized = summaryText.length > batchRawCharCount;
-
         statsAccum.add(result.usage);
+        if (summaryText.length > batchRawCharCount) {
+          safeNotify(ctx, `pruner: summary exceeds raw output for turn ${batch.turnIndex}; originals retained, batch remains pending`, "warning");
+          firstFailureIndex = i;
+          break;
+        }
         totalRawCharCount += batchRawCharCount + dedupRawChars;
         totalSummaryCharCount += summaryText.length;
         totalToolCallCount += batch.toolCalls.length + dedupCount;
@@ -525,19 +526,11 @@ export default function (pi: ExtensionAPI) {
         const batchDetails = makeSummaryDetails(batch, summaryRefs);
 
         try {
-          if (!shouldSkipOversized) {
-            // Write one hidden summary message per turn and index its tool calls.
-            // `display: false` keeps the summary in future LLM context (convertToLlm
-            // ignores `display`) while suppressing the full markdown block from Pi's
-            // main window; rebuild keys on customType, not display.
-            indexer.addBatch(batch, persistAlias);
-            appendSummaryMessage(summaryText, batchDetails);
-            // sendMessage may only queue delivery. Completion is observed from
-            // summary messages at capture/context boundaries, not its void return.
-            floorSources.push(...batch.toolCalls);
-          } else {
-            oversizedBatches.push(batch);
-          }
+          // `display: false` hides the summary in the UI, not in future context.
+          indexer.addBatch(batch, persistAlias);
+          appendSummaryMessage(summaryText, batchDetails);
+          // sendMessage may queue delivery; observed messages establish coverage.
+          floorSources.push(...batch.toolCalls);
         } catch (err) {
           // Persistence error mid-loop: stop here, restore this and remaining batches.
           if (isStaleContextError(err)) {
@@ -579,20 +572,15 @@ export default function (pi: ExtensionAPI) {
           : (lastBatchOrigIndex >= 0 ? dedupedPerBatch[lastBatchOrigIndex].toolCalls : []);
       const lastTC = lastBatchAllTCs[lastBatchAllTCs.length - 1];
 
-      // Outcome precedence: any actual summary wins; oversized beats deduped
-      // beats trivial. (Trivial and deduped are both zero-LLM-cost; deduped
-      // is the more interesting signal because it implies the indexer caught
-      // a redundancy, so it wins the tiebreaker.)
+      // A published summary wins; otherwise deduplication takes precedence over trivial skips.
       const actuallyFlushedCount =
-        processedBatches.length - trivialBatches.length - oversizedBatches.length - dedupedBatches.length;
+        processedBatches.length - trivialBatches.length - dedupedBatches.length;
       const flushOutcome: PruneFrontier["outcome"] =
         actuallyFlushedCount > 0
           ? "summarized"
-          : oversizedBatches.length > 0
-            ? "skipped-oversized"
-            : dedupedBatches.length > 0
-              ? "skipped-deduped"
-              : "skipped-trivial";
+          : dedupedBatches.length > 0
+            ? "skipped-deduped"
+            : "skipped-trivial";
 
       // Projected session branch (message + custom_message entries) for the chain-compression block below.
       // Only materialized when chain compression is enabled.
@@ -687,22 +675,8 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Notify about any batches that were skipped — either oversized or
-      // trivial. Neither is an error: the pruner correctly chose not to grow
-      // context (oversized) or to skip the LLM call entirely (trivial). Both
-      // are silenced by `quietOversizedSkips`, which acts as a single
-      // "quiet all non-error skips" toggle.
+      // The legacy setting name covers all non-error skip notifications.
       if (!currentConfig.value.quietOversizedSkips) {
-        for (const batch of oversizedBatches) {
-          const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          const slot = results[batches.indexOf(batch)];
-          const batchSummaryLen = slot && slot !== "trivial" && slot !== "deduped" ? slot.summaryText.length : 0;
-          safeNotify(
-            ctx,
-            `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
-            "info"
-          );
-        }
         for (const batch of trivialBatches) {
           const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
           safeNotify(
@@ -739,14 +713,9 @@ export default function (pi: ExtensionAPI) {
       processedCount = processedBatches.length;
       outcome = flushOutcome;
 
-      const returnReason: "flushed" | "skipped-oversized" | "skipped-trivial" | "skipped-deduped" =
-        actuallyFlushedCount > 0
-          ? "flushed"
-          : oversizedBatches.length > 0
-            ? "skipped-oversized"
-            : dedupedBatches.length > 0
-              ? "skipped-deduped"
-              : "skipped-trivial";
+      const returnReason = actuallyFlushedCount > 0
+        ? "flushed"
+        : dedupedBatches.length > 0 ? "skipped-deduped" : "skipped-trivial";
 
       return {
         ok: true,
@@ -896,27 +865,6 @@ export default function (pi: ExtensionAPI) {
         ...capturedBatch,
         toolCalls: capturedBatch.toolCalls.filter((tc) => !isProtected(tc.toolName, tc.args, currentConfig.value)),
       };
-
-      // Eager spill: offload oversized single results to sidecar files before they
-      // ever reach a request. addBatch inside marks them isSummarized, so
-      // trimBatchToPendingRange drops them from the pending set below. Best-effort:
-      // a spill failure leaves the result inline for the normal flush pipeline.
-      try {
-        await spillOversizedBatch({
-          batch: filtered,
-          indexer,
-          config: {
-            spillThreshold: currentConfig.value.spillThreshold,
-            spillPreviewBytes: currentConfig.value.spillPreviewBytes,
-            dedupByContentHash: currentConfig.value.dedupByContentHash,
-          },
-          sessionDir: ctx.sessionManager.getSessionDir(),
-          sessionId: ctx.sessionManager.getSessionId(),
-          appendEntry: (type, data) => (ctx.sessionManager as unknown as SessionAppender).appendCustomEntry(type, data),
-        });
-      } catch {
-        // best-effort; never block the turn
-      }
 
       const batch = trimBatchToPendingRange(filtered);
       if (batch) {

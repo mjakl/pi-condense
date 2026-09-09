@@ -1,5 +1,5 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { CUSTOM_TYPE_SUMMARY } from "./types.js";
+import { CUSTOM_TYPE_SUMMARY, QUERY_TOOL_NAME } from "./types.js";
 import type { ChainCompressionEntry } from "./types.js";
 import { substituteBlockRefs } from "./nested-placeholders.js";
 import { extractToolResultText } from "./batch-capture.js";
@@ -108,7 +108,7 @@ export function hasUnsafeProtectedOutput(
   const protectedIds = new Set(protectedToolCallIds);
   for (let i = range.startIndex + 1; i < range.endIndex; i++) {
     const msg = messages[i];
-    if (msg.role === "toolResult" && protectedIds.has(msg.toolCallId) &&
+    if (msg.role === "toolResult" && (protectedIds.has(msg.toolCallId) || msg.toolName === QUERY_TOOL_NAME) &&
       Array.isArray(msg.content) && msg.content.some((block: any) => block.type !== "text")) return true;
   }
   return false;
@@ -199,7 +199,7 @@ export function applyChainCompressions(
         inRangeBareIds.push(msg.toolCallId);
         droppedBareIds.add(msg.toolCallId);
         droppedOccKeys.add(occKey(msg.toolCallId, resultTimestampOf(msg.timestamp)));
-        if (protectedIds.has(msg.toolCallId)) {
+        if (protectedIds.has(msg.toolCallId) || msg.toolName === QUERY_TOOL_NAME) {
           const arr = protectedByBlock.get(entry.blockId) ?? [];
           arr.push({ tool: msg.toolName, text: extractToolResultText(msg) });
           protectedByBlock.set(entry.blockId, arr);

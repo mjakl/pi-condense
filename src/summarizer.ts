@@ -1,4 +1,5 @@
 import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
@@ -118,6 +119,15 @@ async function runOnce(
   ctx: ExtensionContext,
   options: SummarizeBatchOptions
 ): Promise<RunOutcome> {
+  const context = {
+    messages: [{ role: "user" as const, content: [{ type: "text" as const, text: userMessage }], timestamp: Date.now() }],
+  };
+  // Pi estimates tokens and clamps the output budget itself. Do not truncate
+  // input to make it fit; provider rejection or a length stop also retains raw.
+  if (model?.contextWindow > 0 && estimateTokens(context.messages[0]) >= model.contextWindow) {
+    ctx.ui.notify(`pruner: input exceeds estimated context window of ${modelLabel(model)}; originals retained`, "warning");
+    return { kind: "unusable" };
+  }
   const idleMs = config.summarizerIdleTimeoutMs;
   const maxMs = config.summarizerMaxTimeoutMs;
   const timeoutController = new AbortController();
@@ -161,15 +171,7 @@ async function runOnce(
     // either when the user presses Esc, or when an idle/ceiling timeout fires.
     const responseStream = streamSimple(
       effectiveModel,
-      {
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: userMessage }],
-            timestamp: Date.now(),
-          },
-        ],
-      },
+      context,
       {
         apiKey: auth.apiKey,
         headers: auth.headers,
@@ -233,7 +235,10 @@ async function runOnce(
       .map((c: any) => c.text)
       .join("\n");
 
-    if (!isUsableSummary(llmText, response.stopReason)) return { kind: "unusable" };
+    if (!isUsableSummary(llmText, response.stopReason)) {
+      ctx.ui.notify("pruner: summary was empty or length-truncated; originals retained", "warning");
+      return { kind: "unusable" };
+    }
 
     return { kind: "ok", result: { summaryText: llmText, usage: response.usage } };
   } catch (err: any) {

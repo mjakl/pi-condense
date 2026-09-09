@@ -81,7 +81,7 @@ const SUBCOMMANDS = [
   { value: "protected-tools", label: "protected-tools — show or edit the never-pruned tool allowlist" },
   { value: "protected-paths", label: "protected-paths — show or edit the never-pruned path globs" },
   { value: "min-batch-chars", label: "min-batch-chars — show or set the pre-flush trivial-batch threshold" },
-  { value: "recovery-grace", label: "recovery-grace - show or set how long context_tree_query output stays verbatim (user-turn-groups)" },
+  { value: "recovery-grace", label: "recovery-grace - show or set structural recovery-chain deferral (user-turn-groups)" },
   { value: "dedup",   label: "dedup     — toggle pre-flush content-hash dedup (on/off/status)" },
   { value: "help",    label: "help      — show this help" },
 ] as const;
@@ -159,11 +159,7 @@ function pruneStatusLineDescription(config: ContextPruneConfig): string {
 }
 
 function quietOversizedSkipsDescription(config: ContextPruneConfig): string {
-  const base = config.quietOversizedSkips ? "ON" : "OFF";
-  if (config.quietOversizedSkips) {
-    return `Suppress all non-error 'skipped pruning' notifications — both 'oversized' (summary was larger than the raw output) and 'trivial' (batch was below minBatchChars, no LLM call made). The frontier still advances in both cases. Currently ${base}.`;
-  }
-  return `Show 'skipped pruning' info notifications when a batch is skipped — either because the summary would have been larger than the raw output (oversized) or because the batch was below minBatchChars (trivial, no LLM call). Currently ${base}.`;
+  return `${config.quietOversizedSkips ? "Suppress" : "Show"} trivial/dedup skip notifications. Rejected summaries retain originals and always warn.`;
 }
 
 function minBatchCharsDescription(config: ContextPruneConfig): string {
@@ -174,10 +170,7 @@ function minBatchCharsDescription(config: ContextPruneConfig): string {
 }
 
 function recoveryGraceDescription(config: ContextPruneConfig): string {
-  if (config.recoveryGraceTurns === 0) {
-    return "context_tree_query output is stubbed immediately (grace disabled). Set to a positive integer to keep recovered output verbatim for that many user-turn-groups.";
-  }
-  return `context_tree_query (recovery) output stays verbatim for ${config.recoveryGraceTurns} user-turn-group(s) after recovery, then reverts to the stub. Bounds the recover->re-stub->re-query loop. Currently ${config.recoveryGraceTurns}. Set to 0 to disable.`;
+  return `Defer structural compression of recovery chains for ${config.recoveryGraceTurns} user-turn-group(s). Recovery text stays verbatim permanently. 0 disables only the deferral.`;
 }
 
 function idleTimeoutDescription(config: ContextPruneConfig): string {
@@ -263,7 +256,7 @@ Trivial-batch skip (minBatchChars):
   not reconsidered next flush. Default is 1000. Set to 0 to disable.
   This runs BEFORE summarization, so it is cheaper than the post-LLM
   skipped-oversized path that also rejects summaries larger than the raw
-  input. Both skip notifications are silenced by quietOversizedSkips.
+  input. Rejected summaries retain originals and leave the batch pending.
 
 Protected tools:
   Some tools' outputs must stay verbatim across turns — typically planning tools
@@ -1205,7 +1198,7 @@ export function registerCommands(
           saveConfig(currentConfig.value);
           ctx.ui.notify(
             parsed === 0
-              ? "recovery-grace set to 0 - context_tree_query output stubs immediately."
+              ? "recovery-grace set to 0 - structural deferral disabled; recovery text remains verbatim."
               : `recovery-grace set to ${parsed} user-turn-group(s).`,
           );
           break;
