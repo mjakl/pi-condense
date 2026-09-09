@@ -9,6 +9,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
+- Retry initial transient summarizer failures up to 3 times (4 primary attempts), then attempt the distinct session model once with provider-default reasoning. Failed fallback calls retain pending work for later triggers. Sticky fallback, single-attempt cooldown probes, and same-model eligibility are unchanged; timeouts remain per attempt.
+
 - Shorten the configured summarizer model's fallback re-probe cooldown from 10 minutes to 3 minutes. Probing remains on demand at the next summarization call after the cooldown; the duration remains internal and not configurable.
 
 - Simplify the footer to literal `prune: on` when enabled and visible; show nothing when disabled or hidden. Remove footer dividers, activity labels, savings, and diagnostic counters without changing configuration or pruning behavior.

@@ -11,8 +11,8 @@ mock.module("@earendil-works/pi-ai/compat", () => ({
   streamSimple: (...args: any[]) => streamImpl(...args),
 }));
 
-const { summarizeBatch } = await import("./summarizer.js");
-const { FallbackController } = await import("./summarizer-fallback.js");
+const { summarizeBatch, summarizeRange } = await import("./summarizer.js");
+const { FallbackController, COOLDOWN_MS } = await import("./summarizer-fallback.js");
 const { DEFAULT_CONFIG } = await import("./types.js");
 
 const PRIMARY = { id: "primary-model", provider: "provider-a", name: "Primary" };
@@ -153,14 +153,14 @@ describe("runSummarization wiring — enter fallback", () => {
   it("primary transient + fallback ok: returns summary, one warning, no error notify, sticky", async () => {
     const efforts: unknown[] = [];
     streamImpl = (model, _input, opts) => {
-      efforts.push(opts.reasoning);
+      efforts.push(Object.hasOwn(opts, "reasoning") ? opts.reasoning : "omitted");
       return model.id === PRIMARY.id ? errStream("down") : okStream("- fallback summary");
     };
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
     const controller = new FallbackController();
     const r = await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "high" }, ctx, { controller });
-    expect(efforts).toEqual(["high", "high"]);
+    expect(efforts).toEqual(["high", "high", "high", "high", "omitted"]);
     expect(r?.summaryText).toBe("- fallback summary");
     expect(controller.inFallback).toBe(true);
     const warnings = notes.filter((n) => n.level === "warning");
@@ -343,5 +343,156 @@ describe("runSummarization wiring — idle reset keeps a flowing stream alive", 
     const r = await summarizeBatch(makeBatch(), cfg, ctx, {});
     expect(r?.summaryText).toBe("- flowing summary");
     expect(notes.filter((n) => n.level === "warning")).toHaveLength(0);
+  });
+});
+
+
+describe("bounded primary retries", () => {
+  for (const successAt of [1, 2, 3, 4]) {
+    it(`stops on primary success at attempt ${successAt}`, async () => {
+      const seen: string[] = [];
+      streamImpl = (model) => {
+        seen.push(model.id);
+        return seen.length === successAt ? okStream("- primary") : errStream("down");
+      };
+      const notes: Note[] = [];
+      const controller = new FallbackController();
+      expect((await summarizeBatch(makeBatch(), distinctConfig, makeCtx(notes), { controller }))?.summaryText)
+        .toBe("- primary");
+      expect(seen).toEqual(Array(successAt).fill(PRIMARY.id));
+      expect(controller.inFallback).toBe(false);
+      expect(notes).toEqual([]);
+    });
+  }
+
+  it("exhausts thrown transients, stops after one fallback, then recovers on a later call", async () => {
+    const seen: string[] = [];
+    streamImpl = (model) => { seen.push(model.id); throw new Error("down"); };
+    const notes: Note[] = [];
+    const controller = new FallbackController();
+    const ctx = makeCtx(notes);
+    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect(seen).toEqual([...Array(4).fill(PRIMARY.id), SESSION.id]);
+    seen.length = 0;
+    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect(seen).toEqual([SESSION.id]);
+    seen.length = 0;
+    streamImpl = (model, _input, opts) => {
+      seen.push(model.id);
+      expect(Object.hasOwn(opts, "reasoning")).toBe(false);
+      return okStream("- recovered");
+    };
+    expect((await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "off" }, ctx, { controller }))?.summaryText)
+      .toBe("- recovered");
+    expect(seen).toEqual([SESSION.id]);
+  });
+
+  for (const stopReason of ["stop", "length"]) {
+    for (const afterTransient of [false, true]) {
+      it(`${stopReason} unusable response stops, after transient=${afterTransient}`, async () => {
+        let calls = 0;
+        streamImpl = () => {
+          calls++;
+          if (afterTransient && calls === 1) return errStream("down");
+          return {
+            async *[Symbol.asyncIterator]() {},
+            async result() {
+              return { stopReason, content: [{ type: "text", text: stopReason === "length" ? "partial" : " " }], usage: USAGE };
+            },
+          };
+        };
+        const controller = new FallbackController();
+        expect(await summarizeBatch(makeBatch(), distinctConfig, makeCtx([]), { controller })).toBeNull();
+        expect(calls).toBe(afterTransient ? 2 : 1);
+        expect(controller.inFallback).toBe(false);
+      });
+    }
+  }
+
+  it("auth failure on a retry stops without fallback", async () => {
+    let streams = 0;
+    let auths = 0;
+    streamImpl = () => { streams++; return errStream("down"); };
+    const ctx = makeCtx([]);
+    ctx.modelRegistry.getApiKeyAndHeaders = async () => ++auths === 1
+      ? { ok: true, apiKey: "k", headers: {} } : { ok: false, error: "missing credential" };
+    const controller = new FallbackController();
+    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect(auths).toBe(2);
+    expect(streams).toBe(1);
+    expect(controller.inFallback).toBe(false);
+  });
+
+  it("cancellation between attempts prevents retry auth and fallback", async () => {
+    const ac = new AbortController();
+    let auths = 0;
+    const ctx = makeCtx([]);
+    ctx.modelRegistry.getApiKeyAndHeaders = async () => {
+      auths++;
+      return { ok: true, apiKey: "k", headers: {} };
+    };
+    streamImpl = () => ({
+      async *[Symbol.asyncIterator]() {},
+      async result() {
+        return {
+          stopReason: "error",
+          get errorMessage() { ac.abort(); return "down"; },
+          content: [], usage: USAGE,
+        };
+      },
+    });
+    await expect(summarizeBatch(makeBatch(), distinctConfig, ctx, {
+      controller: new FallbackController(), signal: ac.signal,
+    })).rejects.toThrow();
+    expect(auths).toBe(1);
+  });
+
+  it("cancellation during retry auth prevents a new stream", async () => {
+    const ac = new AbortController();
+    let auths = 0;
+    let streams = 0;
+    const ctx = makeCtx([]);
+    ctx.modelRegistry.getProviderAuth = async () => { if (++auths === 2) ac.abort(); };
+    streamImpl = () => { streams++; return errStream("down"); };
+    await expect(summarizeBatch(makeBatch(), distinctConfig, ctx, {
+      controller: new FallbackController(), signal: ac.signal,
+    })).rejects.toThrow();
+    expect(streams).toBe(1);
+    expect(auths).toBe(2);
+  });
+
+  it("range fusion shares retries and default fallback reasoning", async () => {
+    const seen: string[] = [];
+    streamImpl = (model, _input, opts) => {
+      seen.push(model.id);
+      expect(Object.hasOwn(opts, "reasoning")).toBe(model.id === PRIMARY.id);
+      return model.id === PRIMARY.id ? errStream("down") : okStream("fused");
+    };
+    expect((await summarizeRange("summaries", { ...distinctConfig, summarizerThinking: "off" }, makeCtx([]), {
+      controller: new FallbackController(),
+    }))?.summaryText).toBe("fused");
+    expect(seen).toEqual([...Array(4).fill(PRIMARY.id), SESSION.id]);
+  });
+
+  it("claims one primary attempt after cooldown while concurrent calls use fallback", async () => {
+    let now = 0;
+    const controller = new FallbackController(() => now);
+    controller.onBothDown();
+    const seen: string[] = [];
+    streamImpl = (model) => {
+      seen.push(model.id);
+      return model.id === PRIMARY.id ? errStream("down") : okStream("fallback");
+    };
+    now = COOLDOWN_MS;
+    const ctx = makeCtx([]);
+    await Promise.all([1, 2].map(() => summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })));
+    expect(seen.filter((id) => id === PRIMARY.id)).toHaveLength(1);
+    expect(seen.filter((id) => id === SESSION.id)).toHaveLength(2);
+    now += COOLDOWN_MS;
+    seen.length = 0;
+    streamImpl = (model) => { seen.push(model.id); return okStream("primary recovered"); };
+    await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
+    expect(seen).toEqual([PRIMARY.id]);
+    expect(controller.inFallback).toBe(false);
   });
 });
