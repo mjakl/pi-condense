@@ -85,14 +85,14 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 | `context_tree_query` | The tool the model calls to recover a stubbed original by ref (`tN`) or `toolCallId`. A reused id returns every matching occurrence, not just one, including any that were content-deduplicated to an earlier record - see [PRUNING.md § Occurrence Identity](PRUNING.md#occurrence-identity) |
 | Batch vs chain | A batch is one flush's worth of tool calls; a chain is a longer closed sequence eligible for range compression |
 | Prune frontier | The last attempted prune boundary - advances even on a skip, so nothing is reconsidered twice |
-| Diagnostics (`diag u/m/o/b`) | A self-hiding status-line segment surfacing prune-time degradations: `u` = unresolved chain range, `m` = detection/render id mismatch (informational, does not change what's dropped), `o` = orphan tool-result sweep, `b` = an unresolved chain span or incomplete occurrence archive (see below). Each letter's count is omitted when zero; the whole segment disappears when all four are zero. Backing session entries are `context-prune-diagnostic` - see below |
+| Diagnostics | Prune-time degradations recorded only in `context-prune-diagnostic` session entries: unresolved chain ranges, detection/render id mismatches, orphan tool-result sweeps, and archival gaps. See below |
 | Context metrics (`thinking`/`chain share`/`frontier gap`) | Open-cycle thinking tokens, largest-chain share, frontier gap - what the pruner cannot (yet) reclaim, notably in single-chain sessions. Shown on `/pruner status`, never on the footer. See below and [PRUNING.md § Single-chain sessions](PRUNING.md#single-chain-sessions) |
 | Prompt-cache interaction | Why batching (not per-turn pruning) is the default - see [PRUNING.md](PRUNING.md#how-prefix-caching-works) |
 | `cost:external` | The shared cost-reporting channel pi-condense emits on (see above) |
 
 ### Diagnostic entries (`context-prune-diagnostic`)
 
-The status-line `diag u<N>/m<N>/o<N>/b<N>` segment above is backed by `context-prune-diagnostic` session entries - session-log-only, never added to what the model sees. Full mechanics: [PRUNING.md § Diagnostics](PRUNING.md#diagnostics).
+Diagnostics remain in `context-prune-diagnostic` session entries only, never in the footer or the model's context. Full mechanics: [PRUNING.md § Diagnostics](PRUNING.md#diagnostics).
 
 ### Uncovered chains compress too
 
@@ -102,7 +102,7 @@ The status-line `diag u<N>/m<N>/o<N>/b<N>` segment above is backed by `context-p
 
 ### Context metrics (`context-prune-flush-metrics`)
 
-Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in two places, both backed by `computeContextMetrics` (`src/context-metrics.ts`). They are deliberately kept off the footer status line, which stays limited to prune state, reclaim, and diagnostics:
+Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in two places, both backed by `computeContextMetrics` (`src/context-metrics.ts`). The footer carries no metrics; see [Footer status](doc/configuration.md#footer-status-widget). Metrics remain available through:
 
 - `/pruner status` prints a `--- context ---` block: `thinking:`, `chain share:`, `frontier gap:`, plus a `rearmed: yes` line while a reload-rearm probe (below) has recoverable work armed.
 - Each flush attempt (every outcome, including empty/error) writes one `context-prune-flush-metrics` session entry with the pre-flush snapshot - session-log-only, never added to what the model sees, and not reconstructed on reload.
@@ -180,7 +180,7 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 
 The default also protects reads of [pi-gauntlet](https://github.com/jjuraszek/pi-gauntlet)'s per-repo `gauntlet-overrides.md` so the repo's harness contract stays available for gate decisions after pruning.
 
-The full settings JSON, every key, the commands table, footer widget states, spilled-output details, and the summarizer-model-by-plan table live in **[doc/configuration.md](doc/configuration.md)**.
+The full settings JSON, every key, the commands table, footer status, spilled-output details, and the summarizer-model-by-plan table live in **[doc/configuration.md](doc/configuration.md)**.
 
 ## Relationship to the rest of the platform
 

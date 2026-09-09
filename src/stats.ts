@@ -1,4 +1,4 @@
-import type { SummarizerStats, ExternalCostUpdate, LiveReclaim } from "./types.js";
+import type { SummarizerStats, ExternalCostUpdate } from "./types.js";
 import { CUSTOM_TYPE_STATS, EXTERNAL_COST_CHANNEL, EXTERNAL_COST_SOURCE } from "./types.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -37,7 +37,6 @@ export class StatsAccumulator {
     rangesSummarized: 0,
   };
   private baseline = { totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 };
-  private liveReclaim: LiveReclaim | undefined = undefined;
 
   /** Add usage data from one summarizer LLM call. */
   add(usage: Usage): void {
@@ -54,16 +53,6 @@ export class StatsAccumulator {
       inputTokens: this.stats.totalInputTokens - this.baseline.totalInputTokens,
       outputTokens: this.stats.totalOutputTokens - this.baseline.totalOutputTokens,
     };
-  }
-
-  /** Store the before/after context-char measurement from the last prune. */
-  setLiveReclaim(beforeChars: number, afterChars: number): void {
-    this.liveReclaim = { beforeChars, afterChars };
-  }
-
-  /** Return the last live-reclaim measurement, or undefined if none yet. */
-  getLiveReclaim(): LiveReclaim | undefined {
-    return this.liveReclaim;
   }
 
   /** Return a snapshot of the current cumulative stats. */
@@ -92,7 +81,6 @@ export class StatsAccumulator {
       rangesSummarized: 0,
     };
     this.baseline = { totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 };
-    this.liveReclaim = undefined;
   }
 
   /** Serialize stats for session persistence. */

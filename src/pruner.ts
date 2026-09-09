@@ -11,16 +11,6 @@ import type { DiagnosticSink } from "./diagnostics.js";
 import { applySupersede, type SupersedeState } from "./supersede.js";
 
 /**
- * Estimate of a message array's context weight. Serializing the whole array
- * (not just visible text) is deliberate: it counts tool-call argument bodies
- * (error-purge) and tool-result arrays (stub-replace / chain-range) so all
- * reclaim mechanisms register.
- */
-export function sizeMessages(messages: any[]): number {
-  return JSON.stringify(messages).length;
-}
-
-/**
  * Transforms the `context` event message array in five phases:
  *
  * Phase 1 — stub-replace: ToolResultMessages for summarized tool calls are
@@ -67,12 +57,6 @@ export function sizeMessages(messages: any[]): number {
  *   - `pruned: false` — nothing matched; the returned `messages` is the
  *     **original input array reference** so the caller can cheaply skip
  *     the reconstruction path.
- *   - `beforeChars` / `afterChars` — serialized context size (`sizeMessages`)
- *     before and after pruning when `pruned` is true. When `pruned` is false
- *     both are `0`: a no-op sentinel, not a measurement — the size is never
- *     computed on the no-op path (zero `JSON.stringify` over the array), and
- *     the only consumer (`index.ts` live-reclaim) reads them solely under
- *     `if (result.pruned)`.
  *
  * AssistantMessage tool-call blocks (which carry the IDs) are kept
  * unchanged so the model can still reference them by id when calling
@@ -87,7 +71,7 @@ export function pruneMessages(
   recoveryGraceTurns: number = 0,
   diagnostics?: DiagnosticSink,
   supersede?: { state: SupersedeState; isProtected: (toolName: string, args: unknown) => boolean },
-): { messages: any[]; pruned: boolean; beforeChars: number; afterChars: number } {
+): { messages: any[]; pruned: boolean } {
   // Phase 1: stub-replace summarized tool results
   let pruned = false;
   const inGrace = inGraceRecoveryToolCallIds(messages, recoveryGraceTurns);
@@ -213,7 +197,5 @@ export function pruneMessages(
     );
   }
 
-  return pruned
-    ? { messages: current, pruned, beforeChars: sizeMessages(messages), afterChars: sizeMessages(current) }
-    : { messages, pruned, beforeChars: 0, afterChars: 0 };
+  return { messages: current, pruned };
 }

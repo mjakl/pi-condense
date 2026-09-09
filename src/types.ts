@@ -771,12 +771,6 @@ export interface ExternalCostUpdate {
   outputTokens?: number;
 }
 
-/** Transient before/after context-size measurement from the last prune (chars). */
-export interface LiveReclaim {
-  beforeChars: number;
-  afterChars: number;
-}
-
 /** Outcome of the most recent completed prune attempt. */
 export type PruneFrontierOutcome =
   | "summarized"

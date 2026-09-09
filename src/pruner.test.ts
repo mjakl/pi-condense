@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { pruneMessages, sizeMessages } from "./pruner.js";
+import { pruneMessages } from "./pruner.js";
 import { ToolCallIndexer } from "./indexer.js";
 import { CUSTOM_TYPE_INDEX } from "./types.js";
 import type { ChainCompressionConfig, ChainCompressionEntry } from "./types.js";
@@ -735,7 +735,6 @@ describe("orphan sweep in pruneMessages", () => {
     const out = pruneMessages(messages, idx);
     expect(out.messages).toBe(messages);
     expect(out.pruned).toBe(false);
-    expect(out.beforeChars).toBe(0);
   });
 
   it("sweeps an orphan and reports the diagnostic once across repeated renders of the same input", () => {
@@ -880,49 +879,26 @@ describe("occurrence-keyed coverage via mock indexer (spill / protection / grace
   });
 });
 
-describe("sizeMessages", () => {
-  it("counts hidden fields (thinking blocks), not just visible text", () => {
-    // Two messages with identical visible .text but different hidden content.
-    // sizeMessages must count the full serialized weight so all reclaim
-    // mechanisms (stub-replace, error-purge, chain-range-prune) register correctly.
-    const withThinking = [{
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "x".repeat(1000) },
-        { type: "text", text: "hello" },
-      ],
-    }];
-    const withoutThinking = [{
-      role: "assistant",
-      content: [
-        { type: "text", text: "hello" },
-      ],
-    }];
-    expect(sizeMessages(withThinking)).toBeGreaterThan(sizeMessages(withoutThinking));
-  });
-});
-
-describe("pruneMessages beforeChars/afterChars", () => {
-  it("no-op returns {0,0} sentinel and pruned false (no serialization on no-op path)", () => {
+describe("pruneMessages without context sizing", () => {
+  it("preserves the original array on a no-op without serializing it", () => {
     const indexer = makeMockIndexer();
-    // Non-empty input: a reverted fix that recomputes sizeMessages(messages)
-    // on the unconditional path would yield a nonzero beforeChars here and fail.
-    const messages = [{ role: "user", content: "hello", timestamp: 1 }];
+    const messages = [{ role: "user", content: "hello", timestamp: 1,
+      toJSON() { throw new Error("context must not be serialized"); },
+    }];
     const result = pruneMessages(messages, indexer);
     expect(result.pruned).toBe(false);
-    expect(result.beforeChars).toBe(0);
-    expect(result.afterChars).toBe(0);
-    // No-op returns the original array reference unchanged.
     expect(result.messages).toBe(messages);
   });
 
-  it("pruning path: beforeChars > afterChars when stubs shrink content", () => {
+  it("replaces summarized output without serializing either context array", () => {
     const indexer = makeMockIndexer({
       summarized: new Set(["tc1"]),
       shortRefs: new Map([["tc1", "t1"]]),
     });
     const messages = [
-      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", input: {} }], timestamp: 0 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tc1", name: "bash", input: {} }], timestamp: 0,
+        toJSON() { throw new Error("context must not be serialized"); },
+      },
       {
         role: "toolResult",
         toolCallId: "tc1",
@@ -934,9 +910,8 @@ describe("pruneMessages beforeChars/afterChars", () => {
     ];
     const result = pruneMessages(messages, indexer);
     expect(result.pruned).toBe(true);
-    expect(result.beforeChars).toBe(sizeMessages(messages));
-    expect(result.afterChars).toBe(sizeMessages(result.messages));
-    expect(result.afterChars).toBeLessThan(result.beforeChars);
+    expect(result.messages).not.toBe(messages);
+    expect(result.messages[1].content[0].text).toContain("`t1`");
     expect(result.messages).toHaveLength(2);
   });
 });

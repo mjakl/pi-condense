@@ -430,17 +430,51 @@ describe("reload rearm (issue #6)", () => {
     expect(empty.processedBatches).toBe(0);
   });
 
-  it("agent_end shows 'recovered pending (reload)' when rearmed but the in-memory queue is empty", async () => {
-    const { handlers, ctx } = await boot();
-
-    await handlers.get("session_start")!({}, ctx);
+  it("keeps the minimal footer through reload, pending work, summarization, and pruning diagnostics", async () => {
+    const { handlers, commands, ctx, branch, notifications, appended } = await boot({ autoBudgetThreshold: null });
 
     const statusCalls: unknown[] = [];
     ctx.ui.setStatus = (_id: string, text?: string) => statusCalls.push(text);
+    const expectMinimalStatus = () => {
+      expect(statusCalls).toEqual(["prune: on", "prune: on"]);
+    };
 
-    await handlers.get("agent_end")!({}, ctx);
+    await handlers.get("session_start")!({}, ctx);
+    expect(statusCalls).toEqual(["prune: on"]);
+    await handlers.get("session_tree")!({}, ctx);
+    expectMinimalStatus();
+    await handlers.get("turn_end")!({ message: branch[1].message, toolResults: [branch[2].message] }, ctx);
+    expect(notifications).toContain("pruner: 1 turn queued — will summarize on agent's next text response");
+    expectMinimalStatus();
 
-    expect(statusCalls).toContain("\u2502 prune: recovered pending (reload)");
+    const callsBefore = summarizerCalls;
+    const originalStream = streamImpl;
+    streamImpl = () => {
+      expectMinimalStatus();
+      summarizerCalls++;
+      return okStream();
+    };
+    try {
+      await handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, ctx);
+    } finally {
+      streamImpl = originalStream;
+    }
+    expect(summarizerCalls).toBe(callsBefore + 1);
+    expect(appended.some((entry) => entry.type === "context-prune-stats")).toBe(true);
+    expectMinimalStatus();
+
+    const messages = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message").map((entry: any) => entry.message);
+    messages.push({ role: "toolResult", toolCallId: "orphan", toolName: "read", content: [{ type: "text", text: "orphan output" }], timestamp: Date.now() });
+    const result = await handlers.get("context")!({ messages }, ctx);
+    expect(result.messages.some((message: any) => message.toolCallId === "orphan")).toBe(false);
+    expect(result.messages.find((message: any) => message.toolCallId === "tc1").content).not.toEqual(branch[2].message.content);
+    expect(ctx.sessionManager.getBranch().some((entry: any) => entry.customType === "context-prune-diagnostic")).toBe(true);
+    expectMinimalStatus();
+
+    await commands.get("pruner")!("off", ctx);
+    expect(statusCalls).toEqual(["prune: on", "prune: on", undefined]);
+    await commands.get("pruner")!("on", ctx);
+    expect(statusCalls).toEqual(["prune: on", "prune: on", undefined, "prune: on"]);
   });
 
   it("reports a rescan failure to console.error and leaves rearmedPending false, without failing session_start (G4)", async () => {
