@@ -375,11 +375,6 @@ export class ToolCallIndexer {
     appendEntry: (customType: string, data?: unknown) => void,
   ): void {
     if (newKey === originalKey) return;
-    this.dedupAliasToOriginal.set(newKey, originalKey);
-    const originalShortRef = this.toolCallIdToAlias.get(originalKey);
-    if (originalShortRef) {
-      this.toolCallIdToAlias.set(newKey, originalShortRef);
-    }
     const { toolCallId: newToolCallId, resultTimestamp: newResultTimestamp } = parseOccKey(newKey);
     const { toolCallId: originalToolCallId, resultTimestamp: originalResultTimestamp } = parseOccKey(originalKey);
     const payload: DedupAliasEntryData = {
@@ -389,6 +384,11 @@ export class ToolCallIndexer {
       ...(originalResultTimestamp !== undefined ? { originalResultTimestamp } : {}),
     };
     appendEntry(CUSTOM_TYPE_DEDUP_ALIAS, payload);
+    this.dedupAliasToOriginal.set(newKey, originalKey);
+    const originalShortRef = this.toolCallIdToAlias.get(originalKey);
+    if (originalShortRef) {
+      this.toolCallIdToAlias.set(newKey, originalShortRef);
+    }
   }
 
   /**
@@ -497,8 +497,13 @@ export class ToolCallIndexer {
         ...(tc.resultPreview !== undefined ? { resultPreview: tc.resultPreview } : {}),
         ...(tc.contentHash !== undefined ? { contentHash: tc.contentHash } : {}),
       };
-      const key = this.indexRecord(record);
       records.push(record);
+    }
+
+    // Recovery and dedup eligibility must never outlive a failed archive write.
+    appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
+    for (const record of records) {
+      const key = this.indexRecord(record);
       // Populate the dedup hash map AFTER the record is indexed so a future
       // flush can dedup against this record. First-seen wins to keep the
       // canonical id stable across multiple identical entries.
@@ -507,8 +512,6 @@ export class ToolCallIndexer {
         this.contentHashToOriginal.set(hash, key);
       }
     }
-
-    appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);
   }
 
   /**

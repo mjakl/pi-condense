@@ -95,6 +95,35 @@ describe("occurrence keying", () => {
     expect(indexer.lookupByContent("bash", "UNSEEN")).toBeUndefined();
   });
 
+  test("failed ordinary append leaves record, reverse-id and content-hash maps unchanged", () => {
+    const indexer = new ToolCallIndexer();
+    indexer.addBatch(batch(0, 1000, [{ id: "shared", ts: 1150, text: "FIRST" }]), () => {});
+    expect(() => indexer.addBatch(batch(1, 2000, [
+      { id: "shared", ts: 2150, text: "SECOND" },
+      { id: "new", ts: 2151, text: "THIRD" },
+    ]), () => { throw new Error("disk full"); })).toThrow("disk full");
+    expect(indexer.getIndex().size).toBe(1);
+    expect(indexer.getRecordsForId("shared").map((r) => r.resultText)).toEqual(["FIRST"]);
+    expect(indexer.getRecordsForId("new")).toEqual([]);
+    expect(indexer.isSummarized("shared@2150")).toBe(false);
+    expect(indexer.lookupByContent("bash", "SECOND")).toBeUndefined();
+    expect(indexer.lookupByContent("bash", "THIRD")).toBeUndefined();
+    expect(indexer.lookupByContent("bash", "FIRST")).toBe("shared@1150");
+  });
+
+  test("failed duplicate append leaves alias and short-ref maps unchanged", () => {
+    const indexer = new ToolCallIndexer();
+    indexer.addBatch(batch(0, 1000, [{ id: "original", ts: 1150, text: "SAME" }]), () => {});
+    indexer.registerSummaryRefs([{ shortId: "t1", toolCallId: "original", resultTimestamp: 1150 }]);
+    expect(() => indexer.registerDuplicate("duplicate@2150", "original@1150", () => {
+      throw new Error("disk full");
+    })).toThrow("disk full");
+    expect(indexer.isSummarized("duplicate@2150")).toBe(false);
+    expect(indexer.getRecord("duplicate@2150")).toBeUndefined();
+    expect(indexer.getShortRefForToolCallId("duplicate@2150")).toBeUndefined();
+    expect(indexer.getRecord("t1")?.resultText).toBe("SAME");
+  });
+
   test("registerDuplicate persists both occurrence sides and reuses the short ref", () => {
     const indexer = new ToolCallIndexer();
     indexer.addBatch(batch(0, 1000, [{ id: "bash_23", ts: 1150, text: "SAME" }]), () => {});

@@ -787,6 +787,36 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(reloaded.getChainEntries()).toEqual(result.compressedEntries);
   });
 
+  test("failed ordinary indexing is backfilled before partial-chain compression and survives reload", async () => {
+    const messages = chainMessages();
+    messages[3].content[0].id = "c1";
+    messages[4].toolCallId = "c1";
+    const chain = detectChains(messages)[0];
+    const records = extractChainRecords(messages, chain, () => false);
+    const indexer = new ToolCallIndexer();
+    const persisted: any[] = [];
+    const appendEntry = (customType: string, data: unknown) => persisted.push({ type: "custom", customType, data });
+    const ordinaryBatch = (record: typeof records[number]) => ({
+      turnIndex: 0, timestamp: record.timestamp, assistantText: "", toolCalls: [record],
+    });
+    indexer.addBatch(ordinaryBatch(records[0]), appendEntry);
+    indexer.registerSummaryBody([occKey("c1", 1050)], "first output summary");
+    expect(() => indexer.addBatch(ordinaryBatch(records[1]), () => {
+      throw new Error("ordinary index append failed");
+    })).toThrow("ordinary index append failed");
+
+    const { deps } = makeDeterministicDeps({ messages });
+    const result = await compressEligible([chain], 0, { ...deps, indexer, appendEntry } as any);
+    expect(result.compressedEntries).toHaveLength(1);
+    const reloaded = new ToolCallIndexer();
+    reloaded.reconstructFromSession({ sessionManager: { getBranch: () => persisted } } as any);
+    expect(reloaded.getRecord(occKey("c1", 1050))?.resultText).toBe("out1");
+    expect(reloaded.getRecord(occKey("c1", 1150))?.resultText).toBe("out2");
+    expect(reloaded.getRecord(occKey("c1", 1150))?.args).toEqual({ path: "x" });
+    expect(result.compressedEntries[0].toolRefs.map((ref) => reloaded.getRecord(ref)?.resultText)).toContain("out2");
+    expect(reloaded.getChainEntries()).toEqual(result.compressedEntries);
+  });
+
   test("partial coverage fails closed when the missing archive cannot be written", async () => {
     const { deps, registerChainCalls, appended } = makeDeterministicDeps({
       backfillImpl: async () => { throw new Error("disk full"); },

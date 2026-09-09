@@ -36,7 +36,7 @@ Registry checks on 2026-09-09: `npm view <package> version engines --json`.
 
 Both lifecycle tests failed against the pre-fix `index.ts`. The previous chain/spill/config/provider regressions were also demonstrated red before their corrections. Full-suite failures caused by the old `stream` mock were corrected to intercept `streamSimple`; those were stale test wiring, not provider failures.
 
-## Final validation
+## Initial implementation validation
 
 - Pi **0.85.1**: `bun test src/` - **592 passed, 0 failed**, 34 files, 1513 assertions.
 - Pi **0.84.4**: same complete suite - **592 passed, 0 failed**, same files/assertions. Installed as a temporary coherent Pi group with `--no-save`; restored 0.85.1 afterward.
@@ -52,7 +52,7 @@ Both lifecycle tests failed against the pre-fix `index.ts`. The previous chain/s
 
 ## Broken-stream diagnosis: evidence, not attribution
 
-No affected session ID/path or exact error was supplied. The private `codex-lb` provider configuration was not inspected. The names `gpt-6-astra`, `gpt-5.6-luna`, and `gpt-5.6-sol` alone do not establish their API adapter, transport, or backend behavior.
+No affected session ID/path or exact error was available to the implementation investigation when these synthetic checks were run. The private `codex-lb` provider configuration was not inspected by that investigation. The names `gpt-6-astra`, `gpt-5.6-luna`, and `gpt-5.6-sol` alone do not establish their API adapter, transport, or backend behavior.
 
 Verified mechanisms:
 
@@ -65,10 +65,20 @@ Verified mechanisms:
 - Pi's Codex WebSocket adapter can fail with `WebSocket stream closed before response.completed`. HTTP error, malformed replay, incomplete SSE/WebSocket stream, and summarizer timeout are distinct failure classes; "broken stream" does not identify which occurred.
 - Pi 0.84.4 release notes document repaired custom-message/tool-result interleaving and repeated OpenAI-compatible thinking-signature serialization. These are relevant upstream mechanisms, not proof that either caused the reported failures.
 
-Evidence still needed: one explicitly authorized affected session path/ID, exact error text, Pi version, and effective provider API/transport. Inspect only that identified session and compare payloads with condense enabled/disabled; do not rewrite it or make broad paid model probes.
+An affected session was subsequently supplied for separate diagnosis. Runtime and Pi Web investigation remains ongoing: the user still reproduces blocking in Pi Web. These implementation checks do not establish recovery or a single transport cause. Private session identifiers, contents, and operational logs are intentionally excluded here.
+
+## First readiness correction
+
+The first independent readiness pass identified an ordinary-index persistence gap: `addBatch` published records and content-hash canonicals before the index append succeeded. A failed append could therefore suppress backfill and allow a chain drop whose output was not recoverable after reload.
+
+- `addBatch` now constructs records, persists the entry, then publishes record/reverse-ID/content-hash maps, matching existing backfill ordering.
+- Inspection found the same ordering defect in `registerDuplicate`; alias and short-ref maps now change only after the alias entry persists. No new persistence abstraction or retry path was added.
+- Three regressions failed before correction: ordinary-index state after a failed append; duplicate-alias state after a failed append; failed ordinary indexing followed by partial-chain compression and reload. The last test uses real components and repeated IDs, verifying original content and recovery refs after reconstruction.
+- Correction validation on Pi 0.85.1: **595 tests passed, 0 failed**, 34 files. Strict extension typecheck, instruction consistency, and diff checks passed. Dependency versions and persisted entry formats are unchanged.
+- One primary readiness pass and one combined correction set have been consumed. No closure verification or further broad review was performed by the implementation worker.
 
 ## Handoff targets
 
-Independent readiness review has consumed **zero cycles**. Focus it on live summary reconciliation at the active compaction boundary, repeated-ID partial archive coverage, and retained protected content. Adjacent existing limitation: settings controls other than on/off still launch asynchronous `saveConfig` writes without awaiting them; this change does not redesign overlay persistence.
+At the initial implementation handoff, independent readiness review had consumed **zero cycles**. Suggested targets were live summary reconciliation at the active compaction boundary, repeated-ID partial archive coverage, and retained protected content. Adjacent existing limitation: settings controls other than on/off still launch asynchronous `saveConfig` writes without awaiting them; this change does not redesign overlay persistence.
 
 Project map: TypeScript ESM Pi extension; Bun test runner; npm dependency metadata; Node filesystem sidecars; Pi AI summarization; TypeBox tool schemas; Pi TUI command/settings components. Purpose: reduce long-session tool-output context while recovering archived output via `context_tree_query`. Repository-local skill inventory: `.agents/skills/release/SKILL.md` only. Gauntlet overrides live at `.pi/gauntlet-overrides.md`; no sibling code dependency was added and `cost:external` is unchanged.
