@@ -77,6 +77,24 @@ The first independent readiness pass identified an ordinary-index persistence ga
 - Correction validation on Pi 0.85.1: **595 tests passed, 0 failed**, 34 files. Strict extension typecheck, instruction consistency, and diff checks passed. Dependency versions and persisted entry formats are unchanged.
 - One primary readiness pass and one combined correction set have been consumed. No closure verification or further broad review was performed by the implementation worker.
 
+## First hosted correction: archive-first summary publication
+
+Hosted P2 at `fc2ce3c` identified a separate partial-commit window: a summary could be published before its ordinary archive append failed. The next flush generated another summary and refs, while the first summary initially had no recovery records.
+
+The correction separates recovery storage from completion without changing persisted formats:
+
+- Ordinary records are archived before `pi.sendMessage`. `addBatch` skips occurrences already archived, so delivery retries do not append duplicate index records.
+- A successful `sendMessage` return is not an acknowledgement: Pi may queue it. Only observed summary messages and occurrence-qualified metadata establish ordinary completion. Capture, active-context reconciliation, and chain-compression preparation observe existing messages; observation is idempotent.
+- Ordinary archive-only records remain recoverable but are not stubbed or seeded as dedup canonicals. They remain capturable across a frontier and reload. Spills, backfills, compressed chains, and persisted dedup aliases retain their non-LLM replacement behavior; backfilled spills still do not seed dedup.
+- A persisted summary is reused as completion evidence after later bookkeeping failure, so another flush does not generate fresh summary text or refs.
+- No generated-text journal, persistent queue, retry loop, option, or background job was added. Generated text that was never delivered may require another summarizer call after interruption. Durability relies on the append interface contract; this does not make Pi's session-tree mutation or filesystem writes transactional.
+
+Fault-injection regressions at the flush/lifecycle seam initially produced **3 failures, 31 passes**: archive failure leaked a summary; thrown delivery had no archive; queued delivery incorrectly completed the batch. The successful-summary/later-bookkeeping regression passed before and after the correction. Tests now cover archive failure/retry, archive-only recovery and dedup exclusion, queued/thrown delivery followed by reload, frontier bypass, and no duplicate index entry or summary after completion. Existing fixtures that assumed an ordinary archive was already summarized now provide the matching summary evidence.
+
+Validation: complete **599-test suite passed on Pi 0.84.4 and 0.85.1**, including real offline SDK final-response/budget flows, reload, native compaction, spill/backfill recovery, and provider serialization. Strict extension typecheck passed on both versions. Instruction consistency and diff checks passed. The development installation was restored to 0.85.1; dependencies and host minimum are unchanged.
+
+Workflow: one primary full pass, one primary correction set, and one primary closure were already complete. This is the first authorized hosted correction set after one hosted inspection and one read-only design advisory. No further reviewer was launched. Hosted closure and publication remain with Oscar. Separate Pi Web diagnosis remains unresolved and is not attributed to this defect.
+
 ## Handoff targets
 
 At the initial implementation handoff, independent readiness review had consumed **zero cycles**. Suggested targets were live summary reconciliation at the active compaction boundary, repeated-ID partial archive coverage, and retained protected content. Adjacent existing limitation: settings controls other than on/off still launch asynchronous `saveConfig` writes without awaiting them; this change does not redesign overlay persistence.

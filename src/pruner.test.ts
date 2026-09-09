@@ -606,6 +606,7 @@ describe("occurrence-keyed stub replacement", () => {
       } as any,
       () => {},
     );
+    idx.registerSummaryBody(["bash_23@1150"], "old summary");
     const messages: any[] = [
       { role: "assistant", content: [{ type: "toolCall", id: "bash_23", name: "bash", input: {} }], timestamp: 1100 },
       { role: "toolResult", toolCallId: "bash_23", toolName: "bash", content: [{ type: "text", text: "OLD" }], isError: false, timestamp: 1150 },
@@ -681,6 +682,7 @@ describe("occurrence-keyed stub replacement", () => {
         ],
       },
     } as any);
+    idx.registerSummaryBody(["bash_7"], "legacy summary");
     const messages: any[] = [
       { role: "assistant", content: [{ type: "toolCall", id: "bash_7", name: "bash", input: {} }], timestamp: 500 },
       { role: "toolResult", toolCallId: "bash_7", toolName: "bash", content: [{ type: "text", text: "OLD" }], isError: false, timestamp: 550 },
@@ -704,6 +706,7 @@ describe("occurrence-keyed stub replacement", () => {
       },
     } as any);
 
+    idx.registerSummaryBody(["bash_7"], "legacy summary");
     // No migration: a bare-keyed legacy record has no occurrence-keyed
     // siblings, so hasLegacyBareRecord stays true even though a later, live,
     // unrelated occurrence of the same reused provider id now exists.

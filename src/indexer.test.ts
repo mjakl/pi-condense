@@ -39,6 +39,8 @@ describe("occurrence keying", () => {
     const indexer = new ToolCallIndexer();
     indexer.addBatch(batch(0, 1000, [{ id: "bash_23", ts: 1150, text: "FIRST" }]), () => {});
 
+    expect(indexer.isSummarized("bash_23@1150")).toBe(false);
+    indexer.registerSummaryBody(["bash_23@1150"], "first summary");
     expect(indexer.isSummarized("bash_23@1150")).toBe(true);
     expect(indexer.isSummarized("bash_23@3150")).toBe(false);
   });
@@ -88,6 +90,11 @@ describe("occurrence keying", () => {
     indexer.addBatch(batch(0, 1000, [{ id: "bash_23", ts: 1150, text: "FIRST" }]), () => {});
     indexer.addBatch(batch(1, 2000, [{ id: "bash_23", ts: 2150, text: "SECOND" }]), () => {});
 
+    expect(indexer.lookupByContent("bash", "FIRST")).toBeUndefined();
+    expect(indexer.lookupByContent("bash", "SECOND")).toBeUndefined();
+    indexer.registerSummaryBody(["bash_23@1150"], "first summary");
+    indexer.registerSummaryBody(["bash_23@2150"], "second summary");
+
     // Each occurrence's content resolves to its OWN occurrence key, never
     // to the other occurrence merely because they share a bare id.
     expect(indexer.lookupByContent("bash", "FIRST")).toBe("bash_23@1150");
@@ -98,6 +105,7 @@ describe("occurrence keying", () => {
   test("failed ordinary append leaves record, reverse-id and content-hash maps unchanged", () => {
     const indexer = new ToolCallIndexer();
     indexer.addBatch(batch(0, 1000, [{ id: "shared", ts: 1150, text: "FIRST" }]), () => {});
+    indexer.registerSummaryBody(["shared@1150"], "first summary");
     expect(() => indexer.addBatch(batch(1, 2000, [
       { id: "shared", ts: 2150, text: "SECOND" },
       { id: "new", ts: 2151, text: "THIRD" },
@@ -453,6 +461,12 @@ describe("backfillChainRecords", () => {
 
     const blobContents = await readFile(persistedRecord.spillPath, "utf-8");
     expect(blobContents).toBe(bigText);
+    const rebuilt = new ToolCallIndexer();
+    rebuilt.reconstructFromSession({ sessionManager: { getBranch: () => [
+      { type: "custom", customType: CUSTOM_TYPE_INDEX, data: appended[0].data },
+    ] } } as any);
+    expect(rebuilt.isSummarized(occKey("a", 1))).toBe(true);
+    expect(rebuilt.lookupByContent("bash", bigText)).toBeUndefined();
   });
 
   test("reconstruction round-trip: backfilled entry replays without seeding dedup", async () => {
@@ -470,16 +484,22 @@ describe("backfillChainRecords", () => {
     expect(rebuilt.lookupByContent("bash", "out-a")).toBeUndefined();
   });
 
-  test("legacy round-trip unchanged: pre-change entries (no backfilled/refs) still seed dedup", () => {
+  test("legacy ordinary archives require their summary before seeding dedup", () => {
     const indexEntry = {
       type: "custom",
       customType: CUSTOM_TYPE_INDEX,
       data: { toolCalls: [record("a", 1)] },
     };
     const indexer = new ToolCallIndexer();
-    const ctx = { sessionManager: { getBranch: () => [indexEntry] } } as any;
+    const branch: any[] = [indexEntry];
+    const ctx = { sessionManager: { getBranch: () => branch } } as any;
     indexer.reconstructFromSession(ctx);
-
+    expect(indexer.lookupByContent("bash", "out-a")).toBeUndefined();
+    expect(indexer.isSummarized(occKey("a", 1))).toBe(false);
+    branch.push({ type: "custom_message", customType: CUSTOM_TYPE_SUMMARY, content: "summary", details: {
+      toolCallRefs: [{ shortId: "t1", toolCallId: "a", resultTimestamp: 1 }],
+    } });
+    indexer.reconstructFromSession(ctx);
     expect(indexer.lookupByContent("bash", "out-a")).toBe(occKey("a", 1));
   });
 

@@ -23,6 +23,7 @@ it("stub replacement preserves Responses reasoning items and call/output identit
     toolCallId: "call_fixture|fc_fixture", toolName: "read", args: { path: "file" },
     resultText: "original output", resultTimestamp: 3, isError: false,
   }] }, () => {});
+  indexer.registerSummaryBody(["call_fixture|fc_fixture@3"], "fixture summary");
   const rendered = pruneMessages(messages, indexer);
   const payload = convertResponsesMessages(model, { messages: rendered.messages }, new Set([model.provider]));
   expect(payload.find((item: any) => item.type === "reasoning")).toEqual(reasoning);

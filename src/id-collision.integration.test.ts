@@ -201,6 +201,7 @@ describe("id collision, end to end", () => {
       },
       () => {},
     );
+    indexer.registerSummaryBody(["bash_23@2150"], "first summary");
     expect(indexer.isSummarized("bash_23@2150")).toBe(true);
 
     // A NEW live occurrence of the same bare id, at a later resultTimestamp,
@@ -224,6 +225,7 @@ describe("id collision, end to end", () => {
     // Capture it into the index (mirrors a successful summarization flush) and
     // confirm both occurrences remain separately addressable.
     indexer.addBatch(batches[0], () => {});
+    indexer.registerSummaryBody(["bash_23@3150"], "second summary");
     expect(indexer.getRecord("bash_23@2150")?.resultText).toBe("OUT 23 first");
     expect(indexer.getRecord("bash_23@3150")?.resultText).toBe("LIVE 23");
     expect(indexer.isSummarized("bash_23@3150")).toBe(true);

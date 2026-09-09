@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as actualCompat from "@earendil-works/pi-ai/compat";
 import { supersededStub } from "./supersede.js";
+import { ToolCallIndexer } from "./indexer.js";
 
 // This must run before any module that transitively reads PI_CODING_AGENT_DIR
 // (src/config.ts's getAgentDir()) is imported/executed.
@@ -221,11 +222,14 @@ function bootExtension(
   const commands = new Map<string, (args: string, ctx: any) => Promise<void>>();
   const notifications: string[] = [];
 
+  const branch = options.branch ?? defaultBranch();
   const pushPi = (type: string, data?: unknown) => {
     piAppended.push({ type, data });
+    branch.push({ type: "custom", customType: type, data });
   };
   const pushSession = (type: string, data?: unknown) => {
     sessionAppended.push({ type, data });
+    branch.push({ type: "custom", customType: type, data });
   };
 
   const pi: any = {
@@ -235,6 +239,7 @@ function bootExtension(
     appendEntry: options.piAppendEntry ? options.piAppendEntry(pushPi) : pushPi,
     sendMessage(message: any) {
       sessionAppended.push({ type: message.customType, data: { content: message.content, details: message.details } });
+      branch.push({ type: "custom_message", ...message, timestamp: new Date().toISOString() });
     },
     registerCommand(name: string, spec: { handler: (args: string, ctx: any) => Promise<void> }) {
       commands.set(name, spec.handler);
@@ -243,8 +248,6 @@ function bootExtension(
     registerMessageRenderer() {},
     events: { emit() {} },
   };
-
-  const branch = options.branch ?? defaultBranch();
 
   const ctx: any = {
     sessionManager: {
@@ -289,6 +292,76 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
   extension(harness.pi);
   return harness;
 }
+
+describe("summary publication failures", () => {
+  const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
+  const flush = (h: Awaited<ReturnType<typeof boot>>) => h.handlers.get("message_end")!(finish, h.ctx);
+  const summaries = (h: Awaited<ReturnType<typeof boot>>) => h.branch.filter((e: any) => e.customType === "context-prune-summary");
+  const rawIsVisible = async (h: Awaited<ReturnType<typeof boot>>) => {
+    const messages = h.branch.filter((e: any) => e.type === "message").map((e: any) => e.message);
+    const result = await h.handlers.get("context")!({ messages }, h.ctx);
+    return JSON.stringify(result?.messages ?? messages).includes("x".repeat(400));
+  };
+
+  it("archive failure publishes no summary and retry publishes exactly one", async () => {
+    let fail = true;
+    const h = await boot({ sessionAppendCustomEntry: (push) => (type, data) => {
+      if (fail && type === "context-prune-index") throw new Error("archive failed");
+      push(type, data); return "id";
+    } });
+    await h.handlers.get("session_start")!({}, h.ctx);
+    await flush(h);
+    expect(summaries(h)).toHaveLength(0);
+    expect(await rawIsVisible(h)).toBe(true);
+    fail = false;
+    await flush(h);
+    expect(summaries(h)).toHaveLength(1);
+    expect(await rawIsVisible(h)).toBe(false);
+  });
+
+  it.each(["throw", "queue"])("archive without acknowledged summary (%s) remains pending after reload and frontier", async (mode) => {
+    const h = await boot();
+    await h.handlers.get("session_start")!({}, h.ctx);
+    h.pi.sendMessage = () => { if (mode === "throw") throw new Error("delivery failed"); };
+    await flush(h);
+    expect(h.branch.some((e: any) => e.customType === "context-prune-index")).toBe(true);
+    expect(summaries(h)).toHaveLength(0);
+    expect(await rawIsVisible(h)).toBe(true);
+    const archive = new ToolCallIndexer();
+    archive.reconstructFromSession(h.ctx);
+    expect(archive.getRecord("tc1")?.resultText).toBe("x".repeat(400));
+    expect(archive.lookupByContent("read", "x".repeat(400))).toBeUndefined();
+    const reloaded = await boot({ branch: h.branch });
+    await reloaded.handlers.get("session_start")!({}, reloaded.ctx);
+    const before = summarizerCalls;
+    await flush(reloaded);
+    expect(summarizerCalls).toBe(before + 1);
+    expect(summaries(reloaded)).toHaveLength(1);
+    expect(reloaded.branch.filter((e: any) => e.customType === "context-prune-index")).toHaveLength(1);
+    expect(await rawIsVisible(reloaded)).toBe(false);
+  });
+
+  it("published summary survives later bookkeeping failure without another LLM call or refs", async () => {
+    let fail = true;
+    const h = await boot({ sessionAppendCustomEntry: (push) => (type, data) => {
+      if (fail && type === "context-prune-frontier") throw new Error("bookkeeping failed");
+      push(type, data); return "id";
+    } });
+    await h.handlers.get("session_start")!({}, h.ctx);
+    await flush(h);
+    const published = structuredClone(summaries(h));
+    expect(published).toHaveLength(1);
+    const before = summarizerCalls;
+    fail = false;
+    await flush(h);
+    const reloaded = await boot({ branch: h.branch });
+    await reloaded.handlers.get("session_start")!({}, reloaded.ctx);
+    await flush(reloaded);
+    expect(summarizerCalls).toBe(before);
+    expect(summaries(reloaded)).toEqual(published);
+    expect(await rawIsVisible(reloaded)).toBe(false);
+  });
+});
 
 describe("reload rearm (issue #6)", () => {
   it("rearms the turn_end budget gate after a reload so recovered pending work still flushes", async () => {

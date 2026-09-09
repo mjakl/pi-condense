@@ -9,7 +9,7 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
-- Deliver automatic final-response and budget summaries to live context and session history once, without extra turns. Reconcile summaries missing from Pi's next-request snapshot before stubbing results; exclude compacted history.
+- Deliver automatic final-response and budget summaries to live context and session history once, without extra turns. Reconcile summaries missing from Pi's next-request snapshot before stubbing results; exclude compacted history. Archive originals before publishing an ordinary summary, and require an observed summary before ordinary archives may replace raw output or seed dedup. Failed/queued delivery leaves recoverable work discoverable across frontiers and reload; later bookkeeping failures do not duplicate a published summary.
 - Use branch-wide assistant indexes for live capture, matching rescans and persisted frontiers across separate runs and reloads.
 - Archive missing unprotected occurrences before compressing partially summarized chains. Preserve repeated-ID recovery; leave incomplete archives uncompressed. Publish ordinary index and dedup-alias maps only after their session entries persist, so failed writes cannot authorize pruning or suppress recovery backfill.
 - Retain chains with protected non-text outputs, including images, on both new compression and persisted-entry replay.

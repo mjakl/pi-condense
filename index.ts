@@ -23,7 +23,7 @@ import { pruneMessages } from "./src/pruner.js";
 import { isProtected } from "./src/protected.js";
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
-import { formatSummaryToolCallRefs, makeSummaryDetails, substituteInlineRefs } from "./src/summary-refs.js";
+import { formatSummaryToolCallRefs, makeSummaryDetails, normalizeSummaryToolCallRefs, substituteInlineRefs } from "./src/summary-refs.js";
 import type {
   ContextPruneConfig,
   CapturedBatch,
@@ -159,13 +159,18 @@ export default function (pi: ExtensionAPI) {
     // the middle of a long tool chain, keep later tool calls from the same turn
     // instead of dropping the whole batch on the floor.
     if (!currentFrontier) return { ...batch, toolCalls };
-    if (batch.turnIndex < currentFrontier.lastAttemptedTurnIndex) return null;
+    const awaitingSummary = (tc: CapturedBatch["toolCalls"][number]) =>
+      indexer.getIndex().has(occKey(tc.toolCallId, tc.resultTimestamp));
+    if (batch.turnIndex < currentFrontier.lastAttemptedTurnIndex) {
+      const unfinished = toolCalls.filter(awaitingSummary);
+      return unfinished.length ? { ...batch, toolCalls: unfinished } : null;
+    }
     if (batch.turnIndex > currentFrontier.lastAttemptedTurnIndex) return { ...batch, toolCalls };
 
     const originalIndex = toolCalls.findIndex((tc) => tc.toolCallId === currentFrontier.lastAttemptedToolCallId);
     if (originalIndex < 0) return { ...batch, toolCalls };
 
-    const remaining = toolCalls.slice(originalIndex + 1);
+    const remaining = toolCalls.filter((tc, i) => i > originalIndex || awaitingSummary(tc));
     if (remaining.length === 0) return null;
     return { ...batch, toolCalls: remaining };
   };
@@ -174,18 +179,24 @@ export default function (pi: ExtensionAPI) {
     pendingBatches.unshift(...batches);
   };
 
-  // ── Helper: capture + trim + group pending batches (no LLM work) ──────────
-  // Exposed to commands.ts via registerCommands so /pruner now can preview the
-  // queue before opening the multi-row progress overlay.
-  // `rethrow` is for the reload rearm probe only (session_start/session_tree):
-  // it needs to observe a rescan failure so it can console.error and leave
-  // rearmedPending false, per spec. Every other caller (turn_end capture path,
-  // flushPending, /pruner commands) keeps the existing swallow-and-fall-back
-  // behavior so a transient getBranch failure there never blocks the turn.
+  const observeSummaries = (messages: any[]) => {
+    for (const message of messages) {
+      if (message.role !== "custom" || message.customType !== CUSTOM_TYPE_SUMMARY) continue;
+      const refs = normalizeSummaryToolCallRefs(message.details);
+      const text = typeof message.content === "string" ? message.content :
+        message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("\n");
+      indexer.registerSummaryRefs(refs);
+      indexer.registerSummaryBody(refs.map((ref) => occKey(ref.toolCallId, ref.resultTimestamp)), text);
+    }
+  };
+
+  // Preview/capture share the same completion and frontier gates. The reload
+  // probe rethrows rescan errors; ordinary flushes may use captured batches.
   const capturePendingBatches = (ctx: any, opts?: { rethrow?: boolean }): CapturedBatch[] => {
     let batches: CapturedBatch[] = [];
     try {
       const branch = ctx.sessionManager.getBranch();
+      observeSummaries(projectBranchMessages(branch));
       batches = captureUnindexedBatchesFromSession(branch, indexer, protectionPredicate);
     } catch (err) {
       if (opts?.rethrow) throw err;
@@ -525,13 +536,10 @@ export default function (pi: ExtensionAPI) {
             // `display: false` keeps the summary in future LLM context (convertToLlm
             // ignores `display`) while suppressing the full markdown block from Pi's
             // main window; rebuild keys on customType, not display.
-            const batchOccurrenceKeys = batch.toolCalls.map((tc) => occKey(tc.toolCallId, tc.resultTimestamp));
-            appendSummaryMessage(summaryText, batchDetails);
-            indexer.registerSummaryRefs(summaryRefs);
             indexer.addBatch(batch, persistAlias);
-            // Keep the in-memory summary-body registry current so chain compression
-            // can build synthetic chain messages without rescanning session entries.
-            indexer.registerSummaryBody(batchOccurrenceKeys, summaryText);
+            appendSummaryMessage(summaryText, batchDetails);
+            // sendMessage may only queue delivery. Completion is observed from
+            // summary messages at capture/context boundaries, not its void return.
             floorSources.push(...batch.toolCalls);
           } else {
             oversizedBatches.push(batch);
@@ -598,6 +606,7 @@ export default function (pi: ExtensionAPI) {
       let branchMessages: any[] | undefined;
       if (currentConfig.value.chainCompression.enabled) {
         branchMessages = projectBranchMessages(ctx.sessionManager.getBranch());
+        observeSummaries(branchMessages);
       }
 
       const frontierSnapshot: PruneFrontier = {
@@ -638,7 +647,7 @@ export default function (pi: ExtensionAPI) {
       emitExternalCost(pi, statsAccum);
 
       // Chain compression — compress closed chains beyond the rolling window.
-      // Runs after the per-batch summarization so summaryBodies are up to date.
+      // Uses only observed summaries; queued delivery is not summary coverage.
       // Non-fatal: a failure here does not roll back the successful summarization.
       if (currentConfig.value.chainCompression.enabled) {
         try {
@@ -1024,6 +1033,8 @@ export default function (pi: ExtensionAPI) {
       messages = [...messages, summary];
       changed = true;
     }
+
+    observeSummaries(messages);
 
     // pruneMessages is the single source of truth for "is there work to do".
     // It returns the original array reference (pruned: false) only when none of
