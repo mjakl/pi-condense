@@ -102,7 +102,7 @@ Diagnostics remain in `context-prune-diagnostic` session entries only, never in 
 
 ### Context metrics (`context-prune-flush-metrics`)
 
-Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in two places, both backed by `computeContextMetrics` (`src/context-metrics.ts`). The footer shows only literal `prune: on` when both `enabled` and `showPruneStatusLine` are true; otherwise it shows nothing. Metrics remain available through:
+Three metrics the pruner cannot yet reclaim - open-cycle thinking tokens, largest-chain share (%), frontier gap tokens - surface in two places, both backed by `computeContextMetrics` (`src/context-metrics.ts`). The footer carries no metrics; see [Footer status](doc/configuration.md#footer-status-widget). Metrics remain available through:
 
 - `/pruner status` prints a `--- context ---` block: `thinking:`, `chain share:`, `frontier gap:`, plus a `rearmed: yes` line while a reload-rearm probe (below) has recoverable work armed.
 - Each flush attempt (every outcome, including empty/error) writes one `context-prune-flush-metrics` session entry with the pre-flush snapshot - session-log-only, never added to what the model sees, and not reconstructed on reload.
@@ -180,7 +180,7 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 
 The default also protects reads of [pi-gauntlet](https://github.com/jjuraszek/pi-gauntlet)'s per-repo `gauntlet-overrides.md` so the repo's harness contract stays available for gate decisions after pruning.
 
-The full settings JSON, every key, the commands table, footer widget states, spilled-output details, and the summarizer-model-by-plan table live in **[doc/configuration.md](doc/configuration.md)**.
+The full settings JSON, every key, the commands table, footer status, spilled-output details, and the summarizer-model-by-plan table live in **[doc/configuration.md](doc/configuration.md)**.
 
 ## Relationship to the rest of the platform
 

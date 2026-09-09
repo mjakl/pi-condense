@@ -951,7 +951,6 @@ export function registerCommands(
             currentConfig.value = { ...currentConfig.value, pruneOn: modeArg as ContextPruneConfig["pruneOn"] };
           }
           saveConfig(currentConfig.value);
-          setPruneStatusWidget(ctx, currentConfig.value);
           break;
         }
 
@@ -1051,9 +1050,7 @@ export function registerCommands(
             },
           });
 
-          // Remove the widget and restore the normal footer status.
           clearWidget();
-          setPruneStatusWidget(ctx, currentConfig.value);
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";

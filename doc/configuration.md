@@ -1,6 +1,6 @@
 # Configuration reference
 
-Full `contextPrune` settings, commands, footer widget states, spilled outputs,
+Full `contextPrune` settings, commands, footer status, spilled outputs,
 and the summarizer-model-by-plan table. See the [README](../README.md) for the
 6 knobs most people touch and the conceptual model; see
 [PRUNING.md](../PRUNING.md) for the algorithm behind each setting.

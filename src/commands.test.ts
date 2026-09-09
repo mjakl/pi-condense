@@ -1,7 +1,7 @@
 import { describe, it, expect, mock } from "bun:test";
 import { setPruneStatusWidget, registerCommands } from "./commands.js";
 import type { ContextMetricsSnapshot, SummarizerStats } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import { DEFAULT_CONFIG, STATUS_WIDGET_ID } from "./types.js";
 
 // ── /pruner command handler harness (registerCommands) ──────────────────────
 // Drives the real switch-statement handler registered by registerCommands,
@@ -110,10 +110,10 @@ describe("setPruneStatusWidget", () => {
   it("writes exactly prune: on when enabled and visible", () => {
     const setStatus = mock();
     setPruneStatusWidget({ ui: { setStatus } }, { ...DEFAULT_CONFIG, enabled: true, showPruneStatusLine: true });
-    expect(setStatus.mock.calls).toEqual([["context-prune", "prune: on"]]);
+    expect(setStatus.mock.calls).toEqual([[STATUS_WIDGET_ID, "prune: on"]]);
   });
 
-  it("clears a previously visible status when disabled or hidden", () => {
+  it("clears the status when disabled or hidden", () => {
     for (const config of [
       { enabled: false, showPruneStatusLine: true },
       { enabled: true, showPruneStatusLine: false },
@@ -121,9 +121,8 @@ describe("setPruneStatusWidget", () => {
     ]) {
       const setStatus = mock();
       const ctx = { ui: { setStatus } };
-      setPruneStatusWidget(ctx, { ...DEFAULT_CONFIG, enabled: true, showPruneStatusLine: true });
       setPruneStatusWidget(ctx, { ...DEFAULT_CONFIG, ...config });
-      expect(setStatus.mock.calls).toEqual([["context-prune", "prune: on"], ["context-prune", undefined]]);
+      expect(setStatus.mock.calls).toEqual([[STATUS_WIDGET_ID, undefined]]);
     }
   });
 });

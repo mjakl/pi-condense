@@ -560,7 +560,6 @@ export default function (pi: ExtensionAPI) {
 
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed or first call failed)
-        setPruneStatusWidget(ctx, currentConfig.value);
         outcome = "error";
         return { ok: false, reason: "summarizer-failed" };
       }
@@ -637,7 +636,6 @@ export default function (pi: ExtensionAPI) {
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
-      setPruneStatusWidget(ctx, currentConfig.value);
       emitExternalCost(pi, statsAccum);
 
       // Chain compression — compress closed chains beyond the rolling window.
@@ -765,7 +763,6 @@ export default function (pi: ExtensionAPI) {
       // When the abort signal fired, summarizeBatch rethrows rather than
       // swallowing the error.  Don't show a UI error — the user intended this.
       if (options.signal?.aborted) {
-        setPruneStatusWidget(ctx, currentConfig.value);
         return { ok: false, reason: "aborted" };
       }
       if (isStaleContextError(err)) {
@@ -1035,7 +1032,6 @@ export default function (pi: ExtensionAPI) {
       messages = result.messages;
       changed = true;
     }
-    setPruneStatusWidget(ctx, currentConfig.value);
 
     if (!changed) return undefined;
     return { messages };
