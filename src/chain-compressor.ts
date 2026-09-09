@@ -4,7 +4,7 @@ import type { ToolCallIndexer } from "./indexer.js";
 import type { BlockRefIssuer } from "./block-refs.js";
 import type { DiagnosticSink } from "./diagnostics.js";
 import { bareToolCallId, occKey, parseOccKey, resultTimestampOf } from "./occurrence-key.js";
-import { resolveRange } from "./chain-range-prune.js";
+import { hasUnsafeProtectedOutput, resolveRange } from "./chain-range-prune.js";
 import { extractToolResultText } from "./batch-capture.js";
 
 /**
@@ -102,7 +102,7 @@ export interface CompressEligibleDeps {
 }
 
 /**
- * Pure span walk backing the deterministic zero-LLM branch. Excludes
+ * Pure span walk backing archival of every missing occurrence. Excludes
  * protected middles (relocated verbatim at render, never phase-1 stubbed)
  * and already-indexed occurrence keys (retry idempotence).
  */
@@ -125,6 +125,7 @@ export function extractChainRecords(
     } else if (msg.role === "toolResult") {
       const call = open.get(msg.toolCallId);
       if (!call) continue;
+      open.delete(msg.toolCallId);
       if (protectedIds.has(msg.toolCallId)) continue;
       const resultTimestamp = resultTimestampOf(msg.timestamp);
       if (resultTimestamp === undefined) continue;
@@ -213,18 +214,47 @@ export async function compressEligible(
     // Bare ids would match nothing and silently skip every chain.
     const lookupKeys = chain.middleOccurrenceKeys?.length ? chain.middleOccurrenceKeys : chain.middleToolCallIds;
 
-    if (!deps.indexer.hasPerBatchSummaryCoveringAny(lookupKeys)) {
-      // Deterministic zero-LLM fallback (spec 2026-08-14). Fail-closed: any
-      // failure below preserves the historical no-summary skip.
-      const index = deps.indexer.getIndex();
-      const indexed: ToolCallRecord[] = [];
-      for (const key of lookupKeys) {
-        const r = index.get(key);
-        if (r) indexed.push(r);
+    const range = resolveRange(chain, deps.messages);
+    if (!range) {
+      deps.diagnostics.report("backfill-empty", String(chain.startUserTimestamp), `middles=${chain.middleToolCallIds.length}`);
+      skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
+      continue;
+    }
+    if (hasUnsafeProtectedOutput(deps.messages, range, chain.protectedToolCallIds)) {
+      skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
+      continue;
+    }
+    // A summary can cover only part of the span. Every other occurrence still
+    // needs a durable recovery record before the positional drop is authorized.
+    const index = deps.indexer.getIndex();
+    const fresh = extractChainRecords(deps.messages, chain, (k) => index.has(k));
+    const freshKeys = new Set(fresh.map((r) => occKey(r.toolCallId, r.resultTimestamp)));
+    const isRecoverable = (key: string) => index.has(key) || freshKeys.has(key);
+    const protectedIds = new Set(chain.protectedToolCallIds ?? []);
+    const missing = deps.messages.slice(range.startIndex + 1, range.endIndex).some((msg) =>
+      msg.role === "toolResult" && !protectedIds.has(msg.toolCallId) &&
+      (resultTimestampOf(msg.timestamp) === undefined || !isRecoverable(occKey(msg.toolCallId, msg.timestamp))),
+    ) || (chain.middleOccurrenceKeys ?? []).some((key) => !protectedIds.has(bareToolCallId(key)) && !isRecoverable(key));
+    if (missing) {
+      deps.diagnostics.report("backfill-empty", String(chain.startUserTimestamp), "incomplete occurrence archive");
+      skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
+      continue;
+    }
+    const indexed = lookupKeys.flatMap((key) => {
+      const record = index.get(key);
+      return record ? [record] : [];
+    });
+    try {
+      if (fresh.length > 0) {
+        await deps.indexer.backfillChainRecords(fresh, { ...deps.backfill, appendEntry: deps.appendEntry });
       }
-      const fresh = extractChainRecords(deps.messages, chain, (k) => index.has(k));
+    } catch {
+      skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
+      continue;
+    }
+
+    if (!deps.indexer.hasPerBatchSummaryCoveringAny(lookupKeys)) {
       if (fresh.length === 0 && indexed.length === 0) {
-        const protectedIds = new Set(chain.protectedToolCallIds ?? []);
         const fullyProtected =
           chain.middleToolCallIds.length > 0 && chain.middleToolCallIds.every((id) => protectedIds.has(id));
         if (!fullyProtected) {
@@ -235,14 +265,6 @@ export async function compressEligible(
             `middles=${chain.middleToolCallIds.length}`,
           );
         }
-        skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
-        continue;
-      }
-      try {
-        if (fresh.length > 0) {
-          await deps.indexer.backfillChainRecords(fresh, { ...deps.backfill, appendEntry: deps.appendEntry });
-        }
-      } catch {
         skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
         continue;
       }

@@ -6,9 +6,26 @@ import { CUSTOM_TYPE_CHAIN } from "./types.js";
 import { detectChains } from "./chain-detector.js";
 import { inGraceRecoveryToolCallIds } from "./recovery-grace.js";
 import { occKey } from "./occurrence-key.js";
+import { ToolCallIndexer } from "./indexer.js";
 
 function closed(startUserTimestamp: number, toolCallIds: string[] = [`tc-${startUserTimestamp}`]): ChainRange {
   return { startUserTimestamp, middleToolCallIds: toolCallIds, finalAssistantTimestamp: startUserTimestamp + 100 };
+}
+
+function archivedChainFixture(start = 100, id = "tc1", resultTimestamp = 150, end = 200) {
+  const messages = [
+    { role: "user", timestamp: start, content: [] },
+    { role: "assistant", timestamp: start + 1, content: [{ type: "toolCall", id, name: "bash", arguments: {} }] },
+    { role: "toolResult", toolCallId: id, toolName: "bash", timestamp: resultTimestamp, content: [{ type: "text", text: "output" }] },
+    { role: "assistant", timestamp: end, content: [{ type: "text", text: "done" }] },
+  ];
+  const records = extractChainRecords(messages, { startUserTimestamp: start, finalAssistantTimestamp: end }, () => false);
+  return {
+    messages,
+    getIndex: () => new Map(records.map((r) => [occKey(r.toolCallId, r.resultTimestamp), r])),
+    diagnostics: { report: () => {} },
+    backfill: { spillThreshold: 1_000_000, spillPreviewBytes: 2048, sessionDir: "/tmp", sessionId: "s1" },
+  };
 }
 
 function emptyMiddle(startUserTimestamp: number): ChainRange {
@@ -103,7 +120,7 @@ describe("compressEligible", () => {
       getPerBatchSummariesForToolCallIds: (_ids: string[]) => opts.perBatchSummaries ?? [],
       getToolRefsForToolCallIds: (_ids: string[]) => opts.toolRefs ?? [],
       registerChain: (_entry: ChainCompressionEntry) => {},
-      getIndex: () => new Map(),
+      getIndex: archivedChainFixture().getIndex,
       backfillChainRecords: async () => [{ shortId: "t1", toolCallId: "c1", resultTimestamp: 1050 }],
     } satisfies ChainCompressorIndexerDeps;
   }
@@ -113,14 +130,7 @@ describe("compressEligible", () => {
     return { issue: () => ids[i++] ?? `b${i}` } satisfies Pick<import("./block-refs.js").BlockRefIssuer, "issue">;
   }
 
-  // Covered-path fixtures never take the deterministic branch (hasSummary
-  // defaults true), so these three fields are unused at runtime - but
-  // CompressEligibleDeps requires them, so the fixture supplies inert defaults.
-  const NOOP_BACKFILL_DEPS = {
-    messages: [] as any[],
-    diagnostics: { report: () => {} },
-    backfill: { spillThreshold: 1_000_000, spillPreviewBytes: 2048, sessionDir: "/tmp", sessionId: "s1" },
-  };
+  const NOOP_BACKFILL_DEPS = archivedChainFixture();
 
   test("compresses eligible chains and returns entries", async () => {
     const chains = [closed(100, ["tc1"]), closed(300), closed(500), closed(700)];
@@ -149,6 +159,7 @@ describe("compressEligible", () => {
       blockRefs: makeBlockRefs(["b1"]),
       appendEntry: (_type, data) => appended.push(data),
       now: () => 42,
+      ...NOOP_BACKFILL_DEPS,
     });
     expect(result.compressedEntries).toHaveLength(1);
     const entry = result.compressedEntries[0];
@@ -381,6 +392,7 @@ describe("selectEligible - recovery grace deferral", () => {
 });
 
 describe("occurrence keys in compression", () => {
+  const fixture = archivedChainFixture(1000, "bash_23", 1150, 1200);
   const chain = {
     startUserTimestamp: 1000,
     middleToolCallIds: ["bash_23"],
@@ -395,6 +407,7 @@ describe("occurrence keys in compression", () => {
       indexer: {
         getChainEntries: () => [],
         hasPerBatchSummaryCoveringAny: (ids: string[]) => (asked.push(ids), true),
+        getIndex: fixture.getIndex,
         getPerBatchSummariesForToolCallIds: (ids: string[]) => (asked.push(ids), ["s1"]),
         getToolRefsForToolCallIds: (ids: string[]) => (asked.push(ids), ["t1"]),
         registerChain: () => {},
@@ -402,6 +415,7 @@ describe("occurrence keys in compression", () => {
       blockRefs: { issue: () => "b1" },
       appendEntry: () => {},
       now: () => 5000,
+      ...fixture,
     };
     await compressEligible([chain as any], 0, deps as any);
     expect(asked).toEqual([["bash_23@1150"], ["bash_23@1150"]]);
@@ -411,6 +425,7 @@ describe("occurrence keys in compression", () => {
     const appended: any[] = [];
     const deps = {
       indexer: {
+        getIndex: fixture.getIndex,
         getChainEntries: () => [],
         hasPerBatchSummaryCoveringAny: () => true,
         getPerBatchSummariesForToolCallIds: () => ["s1"],
@@ -420,6 +435,7 @@ describe("occurrence keys in compression", () => {
       blockRefs: { issue: () => "b1" },
       appendEntry: (_t: string, data: unknown) => appended.push(data),
       now: () => 5000,
+      ...fixture,
     };
     const { compressedEntries } = await compressEligible([chain as any], 0, deps as any);
     expect(compressedEntries[0].droppedToolCallIds).toEqual(["bash_23"]);
@@ -430,6 +446,7 @@ describe("occurrence keys in compression", () => {
   test("a chain without middleOccurrenceKeys falls back to bare ids", async () => {
     const deps = {
       indexer: {
+        getIndex: fixture.getIndex,
         getChainEntries: () => [],
         hasPerBatchSummaryCoveringAny: () => true,
         getPerBatchSummariesForToolCallIds: () => ["s1"],
@@ -439,6 +456,7 @@ describe("occurrence keys in compression", () => {
       blockRefs: { issue: () => "b1" },
       appendEntry: () => {},
       now: () => 5000,
+      ...fixture,
     };
     const { compressedEntries } = await compressEligible(
       [{ ...chain, middleOccurrenceKeys: undefined } as any],
@@ -727,8 +745,85 @@ describe("compressEligible - deterministic zero-LLM branch", () => {
     expect(backfillCalls).toHaveLength(1);
   });
 
-  test("covered path is untouched: backfill never invoked, entry matches identity pin", async () => {
-    const { deps, backfillCalls } = makeDeterministicDeps();
+  test("partial summary coverage archives the missing repeated-id occurrence", async () => {
+    const messages = chainMessages();
+    messages[3].content[0].id = "c1";
+    messages[4].toolCallId = "c1";
+    const records = extractChainRecords(messages, uncoveredChain(), () => false);
+    const { deps, backfillCalls } = makeDeterministicDeps({
+      messages,
+      indexRecords: new Map([[occKey("c1", 1050), records[0]]]),
+    });
+    deps.indexer.hasPerBatchSummaryCoveringAny = () => true;
+    const result = await compressEligible([{
+      ...uncoveredChain(), middleToolCallIds: ["c1", "c1"],
+      middleOccurrenceKeys: [occKey("c1", 1050), occKey("c1", 1150)],
+    }], 0, deps as any);
+    expect(result.compressedEntries).toHaveLength(1);
+    expect(backfillCalls).toHaveLength(1);
+    expect(backfillCalls[0].records).toEqual([records[1]]);
+  });
+
+  test("partially summarized repeated-id outputs remain recoverable after reload", async () => {
+    const messages = chainMessages();
+    messages[3].content[0].id = "c1";
+    messages[4].toolCallId = "c1";
+    const chain = detectChains(messages)[0];
+    const records = extractChainRecords(messages, chain, () => false);
+    const indexer = new ToolCallIndexer();
+    const persisted: any[] = [];
+    const { deps } = makeDeterministicDeps({ messages });
+    const appendEntry = (customType: string, data: unknown) => persisted.push({ type: "custom", customType, data });
+    await indexer.backfillChainRecords([records[0]], { ...deps.backfill, appendEntry });
+    indexer.registerSummaryBody([occKey("c1", 1050)], "first output summary");
+    const result = await compressEligible([chain], 0, { ...deps, indexer, appendEntry } as any);
+    expect(result.compressedEntries).toHaveLength(1);
+    expect(result.compressedEntries[0].toolRefs).toEqual(["t1", "t2"]);
+    const reloaded = new ToolCallIndexer();
+    reloaded.reconstructFromSession({ sessionManager: { getBranch: () => persisted } } as any);
+    expect(reloaded.getRecord("t1")?.resultText).toBe("out1");
+    expect(reloaded.getRecord("t2")?.resultText).toBe("out2");
+    expect(reloaded.getRecord("t2")?.args).toEqual({ path: "x" });
+    expect(reloaded.getChainEntries()).toEqual(result.compressedEntries);
+  });
+
+  test("partial coverage fails closed when the missing archive cannot be written", async () => {
+    const { deps, registerChainCalls, appended } = makeDeterministicDeps({
+      backfillImpl: async () => { throw new Error("disk full"); },
+    });
+    deps.indexer.hasPerBatchSummaryCoveringAny = () => true;
+    const result = await compressEligible([uncoveredChain()], 0, deps as any);
+    expect(result.compressedEntries).toHaveLength(0);
+    expect(registerChainCalls).toHaveLength(0);
+    expect(appended).toHaveLength(0);
+  });
+
+  test("partial coverage fails closed for a result without a matching call or timestamp", async () => {
+    for (const invalid of ["call", "timestamp"]) {
+      const messages = chainMessages();
+      if (invalid === "call") messages[3].content = [];
+      else delete (messages[4] as any).timestamp;
+      const { deps, appended, backfillCalls } = makeDeterministicDeps({ messages });
+      deps.indexer.hasPerBatchSummaryCoveringAny = () => true;
+      expect((await compressEligible([uncoveredChain()], 0, deps as any)).compressedEntries).toHaveLength(0);
+      expect(appended).toHaveLength(0);
+      expect(backfillCalls).toHaveLength(0);
+    }
+  });
+
+  test("covered protected image chains stay intact before persistence", async () => {
+    const messages = chainMessages();
+    messages[4].content.push({ type: "image", data: "AA==", mimeType: "image/png" } as any);
+    const { deps, appended } = makeDeterministicDeps({ messages });
+    deps.indexer.hasPerBatchSummaryCoveringAny = () => true;
+    const result = await compressEligible([{ ...uncoveredChain(), protectedToolCallIds: ["c2"] }], 0, deps as any);
+    expect(result.compressedEntries).toHaveLength(0);
+    expect(appended).toHaveLength(0);
+  });
+
+  test("fully archived covered path does not backfill or change entry shape", async () => {
+    const fixture = archivedChainFixture();
+    const { deps, backfillCalls } = makeDeterministicDeps({ messages: fixture.messages, indexRecords: fixture.getIndex() });
     // Override to simulate coverage so the covered branch (not the deterministic one) runs.
     (deps.indexer as any).hasPerBatchSummaryCoveringAny = () => true;
     (deps.indexer as any).getToolRefsForToolCallIds = () => ["t1"];
