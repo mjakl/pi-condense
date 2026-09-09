@@ -1000,7 +1000,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
   const PROTECTED_PATH = "/x/skills/a/SKILL.md";
   const PROTECTED_GLOB = "**/skills/**/*.md";
 
-  function protectedRead(id: string, ts: number, text = `content-${id}`): any[] {
+  function protectedRead(id: string, ts: number, text = "protected content"): any[] {
     return [
       {
         type: "message",
@@ -1008,7 +1008,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
       },
       {
         type: "message",
-        message: { role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], timestamp: ts },
+        message: { role: "toolResult", toolCallId: id, toolName: "read", isError: false, content: [{ type: "text", text }], timestamp: ts },
       },
     ];
   }
@@ -1046,8 +1046,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     // No flush/compression/cold-cache event between the two reads.
     const rendered = await render(branch, handlers, ctx);
 
-    expect(toolResultText(rendered, "r1")).toBe("content-r1");
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r1")).toBe("protected content");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   it("an indexed flush whose unprotected result precedes the older read stubs it", async () => {
@@ -1078,7 +1078,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
 
     const rendered = await render(branch, handlers, ctx);
     expect(toolResultText(rendered, "r1")).toBe(supersededStub(PROTECTED_PATH));
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
     // Phase 1 (unrelated to supersede) already stubs bash1's own result.
     expect(toolResultText(rendered, "bash1")).not.toBe("x".repeat(400));
   });
@@ -1110,8 +1110,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     const rendered = await render(branch, handlers, ctx);
     // Floor = 20 (bash1's resultTimestamp); r1's timestamp (10) is before it,
     // so the floor never reaches it even though a real rewrite just happened.
-    expect(toolResultText(rendered, "r1")).toBe("content-r1");
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r1")).toBe("protected content");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   it("a protected-only turn sets no floor", async () => {
@@ -1134,8 +1134,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
           ],
         },
         toolResults: [
-          { role: "toolResult", toolCallId: "r1", toolName: "read", content: [{ type: "text", text: "content-r1" }], timestamp: 10 },
-          { role: "toolResult", toolCallId: "r2", toolName: "read", content: [{ type: "text", text: "content-r2" }], timestamp: 30 },
+          { role: "toolResult", toolCallId: "r1", toolName: "read", isError: false, content: [{ type: "text", text: "protected content" }], timestamp: 10 },
+          { role: "toolResult", toolCallId: "r2", toolName: "read", isError: false, content: [{ type: "text", text: "protected content" }], timestamp: 30 },
         ],
         turnIndex: 1,
       },
@@ -1145,8 +1145,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
 
     const rendered = await render(branch, handlers, ctx);
-    expect(toolResultText(rendered, "r1")).toBe("content-r1");
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r1")).toBe("protected content");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   const COLD_CACHE_EVENTS = ["session_start", "session_tree", "model_select", "session_compact", "thinking_level_select"];
@@ -1162,14 +1162,14 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
 
       branch.push(...protectedRead("r2", 30));
       const beforeEvent = await render(branch, handlers, ctx);
-      expect(toolResultText(beforeEvent, "r1")).toBe("content-r1");
-      expect(toolResultText(beforeEvent, "r2")).toBe("content-r2");
+      expect(toolResultText(beforeEvent, "r1")).toBe("protected content");
+      expect(toolResultText(beforeEvent, "r2")).toBe("protected content");
 
       await handlers.get(eventName)!({}, ctx);
 
       const afterEvent = await render(branch, handlers, ctx);
       expect(toolResultText(afterEvent, "r1")).toBe(supersededStub(PROTECTED_PATH));
-      expect(toolResultText(afterEvent, "r2")).toBe("content-r2");
+      expect(toolResultText(afterEvent, "r2")).toBe("protected content");
     });
   }
 
@@ -1189,7 +1189,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
 
     const second = await render(branch, handlers, ctx);
     expect(toolResultText(second, "r1")).toBe(supersededStub(PROTECTED_PATH));
-    expect(toolResultText(second, "r2")).toBe("content-r2");
+    expect(toolResultText(second, "r2")).toBe("protected content");
   });
 
   it("chain compression lowers the floor: the older read stubs inside the compressed chain's <protected-output>, the newer read stays raw", async () => {
@@ -1212,7 +1212,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
         t += 100;
         msgs.push({
           type: "message",
-          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: c.text }], timestamp: t },
+          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, isError: false, content: [{ type: "text", text: c.text }], timestamp: t },
         });
       }
       t += 1000;
@@ -1224,7 +1224,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
       0,
       [
         { id: "c0-bash", name: "bash", args: {}, text: "x".repeat(400) },
-        { id: "c0-read", name: "read", args: { path: PROTECTED_PATH }, text: "content-r1" },
+        { id: "c0-read", name: "read", args: { path: PROTECTED_PATH }, text: "protected content" },
       ],
       1000,
     );
@@ -1272,7 +1272,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect(chainText).toContain('<protected-output tool="read">');
     expect(chainText).toContain(supersededStub(PROTECTED_PATH));
 
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   it("a skipped-trivial batch (below minBatchChars) sets no floor", async () => {
@@ -1306,8 +1306,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect((frontierEntries[0].data as any).outcome).toBe("skipped-trivial");
 
     const rendered = await render(branch, handlers, ctx);
-    expect(toolResultText(rendered, "r1")).toBe("content-r1");
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r1")).toBe("protected content");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   it("a skipped-oversized batch (summary longer than raw) sets no floor", async () => {
@@ -1341,8 +1341,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect((frontierEntries[0].data as any).outcome).toBe("skipped-oversized");
 
     const rendered = await render(branch, handlers, ctx);
-    expect(toolResultText(rendered, "r1")).toBe("content-r1");
-    expect(toolResultText(rendered, "r2")).toBe("content-r2");
+    expect(toolResultText(rendered, "r1")).toBe("protected content");
+    expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
   it("a dedup alias registered in a fully-deduped (skipped-deduped) batch still lowers the floor", async () => {
@@ -1399,7 +1399,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     const rendered = await render(branch, handlers, ctx);
 
     expect(toolResultText(rendered, "r_old")).toBe(supersededStub(PROTECTED_PATH));
-    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+    expect(toolResultText(rendered, "r_new")).toBe("protected content");
   });
 
   it("a chain-compression floor (anchor timestamp) is distinguishable from the indexed-result floor", async () => {
@@ -1421,7 +1421,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
       for (const c of toolCalls) {
         msgs.push({
           type: "message",
-          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: c.text }], timestamp: (c as any).ts },
+          message: { role: "toolResult", toolCallId: c.id, toolName: c.name, isError: false, content: [{ type: "text", text: c.text }], timestamp: (c as any).ts },
         });
       }
       msgs.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `done ${startTs}` }], timestamp: startTs + 1 } });
@@ -1429,7 +1429,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     }
 
     const chain0 = closedChain(10, [{ id: "c0-bash", name: "bash", args: {}, text: "x".repeat(400), ts: 5000 } as any]);
-    const chain1 = closedChain(6000, [{ id: "c1-read", name: "read", args: { path: PROTECTED_PATH }, text: "content-r_old", ts: 100 } as any]);
+    const chain1 = closedChain(6000, [{ id: "c1-read", name: "read", args: { path: PROTECTED_PATH }, text: "protected content", ts: 100 } as any]);
     const chain2 = closedChain(9000, [{ id: "c2-bash", name: "bash", args: {}, text: "y".repeat(400), ts: 7000 } as any]);
     const chain3 = closedChain(13000, [{ id: "c3-bash", name: "bash", args: {}, text: "z".repeat(400), ts: 8000 } as any]);
 
@@ -1460,7 +1460,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     const rendered = await render(branch, handlers, ctx);
 
     expect(toolResultText(rendered, "c1-read")).toBe(supersededStub(PROTECTED_PATH));
-    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+    expect(toolResultText(rendered, "r_new")).toBe("protected content");
   });
 
   it("combined lowering is monotonic: a later, higher-timestamp floor source cannot raise floor back up", async () => {
@@ -1507,6 +1507,6 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     // r_mid (500) sits between the low floor source (10) and the high one
     // (1000): only a floor still clamped at 10 explains its activation.
     expect(toolResultText(rendered, "r_mid")).toBe(supersededStub(PROTECTED_PATH));
-    expect(toolResultText(rendered, "r_new")).toBe("content-r_new");
+    expect(toolResultText(rendered, "r_new")).toBe("protected content");
   });
 });

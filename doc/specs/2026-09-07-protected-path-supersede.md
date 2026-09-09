@@ -1,7 +1,7 @@
 # Protected-path supersession: only the newest read of a protected path stays verbatim
 
 Date: 2026-09-07
-Status: approved for planning
+Status: historical; candidate identity and error handling superseded by [preserve distinct protected read evidence](2026-09-09-protected-read-evidence.md). The path-only and failed-read decisions below describe the original behavior, not the current contract. Cache cadence and occurrence pairing remain in effect.
 Predecessor: [`doc/specs/2026-06-11-protected-paths.md`](./2026-06-11-protected-paths.md) - partially superseded (the "stays verbatim in context forever" edge case)
 
 ## Problem

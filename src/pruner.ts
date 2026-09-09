@@ -38,8 +38,8 @@ export function sizeMessages(messages: any[]): number {
  *     to recovery is present on the toolResult itself, not only in the
  *     separate summary message.
  *
- * Phase 1b — supersede: protected reads (never indexed) whose `args.path`
- * is read again later in the same context are replaced with a one-line
+ * Phase 1b — supersede: successful protected text reads with a later identical
+ * result for the same normalized path are replaced with a one-line
  * "superseded" stub, but only once `SupersedeState.floor` says the pruner
  * is rewriting at/before their position anyway (or the cache is cold).
  * See src/supersede.ts. Runs before phase 3 so a superseded read inside a
@@ -145,7 +145,7 @@ export function pruneMessages(
 
   let current: any[] = pruned ? next : messages;
 
-  // Phase 1b: supersede older protected reads of a re-read path
+  // Phase 1b: supersede older identical successful protected text reads
   if (supersede) {
     const afterSupersede = applySupersede(current, supersede.state, supersede.isProtected);
     if (afterSupersede !== current) {

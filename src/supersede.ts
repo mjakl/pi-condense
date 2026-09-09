@@ -3,8 +3,8 @@ import { occKey, resultTimestampOf } from "./occurrence-key.js";
 
 /**
  * Protected reads are never indexed, so nothing else in the pipeline ever
- * collapses a re-read of the same skill file. This module keeps only the
- * newest protected read per `args.path` verbatim (spec 2026-09-07).
+ * collapses a re-read of the same skill file. Only identical successful text
+ * results can replace one another: paths and pagination args do not prove coverage.
  */
 export interface SupersededCandidate {
   toolCallId: string;
@@ -53,7 +53,7 @@ export function findSuperseded(messages: any[], isProtected: IsProtectedFn): Sup
   // Provider ids repeat across turns and an aborted call has no result, so pairing
   // uses the same per-turn open-set model as orphan-sweep, not a global per-id cursor.
   let open = new Map<string, any>();
-  const byPath = new Map<string, SupersededCandidate[]>();
+  const byContent = new Map<string, SupersededCandidate[]>();
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
@@ -67,7 +67,8 @@ export function findSuperseded(messages: any[], isProtected: IsProtectedFn): Sup
       if (!block) continue;
       open.delete(m.toolCallId);
       const args = block.input ?? block.args ?? block.arguments ?? {};
-      if (!isProtected(block.name, args)) continue;
+      if (block.name !== "read" || !isProtected(block.name, args) || m.isError !== false) continue;
+      if (!Array.isArray(m.content) || !m.content.every((part: any) => part.type === "text")) continue;
       const rawPath = (args as Record<string, unknown>)?.path;
       if (typeof rawPath !== "string") continue;
       const path = normalizePath(rawPath);
@@ -77,16 +78,17 @@ export function findSuperseded(messages: any[], isProtected: IsProtectedFn): Sup
         timestamp: resultTimestampOf(m.timestamp),
         resultIndex: i,
       };
-      const list = byPath.get(path);
+      const key = JSON.stringify([path, m.content]);
+      const list = byContent.get(key);
       if (list) list.push(cand);
-      else byPath.set(path, [cand]);
+      else byContent.set(key, [cand]);
       continue;
     }
     open = new Map();
   }
 
   const out: SupersededCandidate[] = [];
-  for (const list of byPath.values()) for (let i = 0; i < list.length - 1; i++) out.push(list[i]);
+  for (const list of byContent.values()) for (let i = 0; i < list.length - 1; i++) out.push(list[i]);
   out.sort((a, b) => a.resultIndex - b.resultIndex);
   return out;
 }

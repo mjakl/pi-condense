@@ -1,6 +1,6 @@
 # Preserve distinct protected read evidence
 
-Status: implementation authorized
+Status: implemented and validated
 Supersedes: [protected-path supersession](2026-09-07-protected-path-supersede.md), candidate identity and error handling only.
 
 ## Evidence
@@ -37,4 +37,7 @@ The existing occurrence pairing, cache-floor activation, branch reconstruction, 
 
 ## Validation
 
-Add regressions before changing implementation and record their failure on the old behavior. Run focused tests, the retained isolated SDK/provider-seam harness, the full native suite, strict TypeScript, and shared instruction-core checks. Perform one focused readiness review of this correction before opening the PR.
+- Before correction: the focused candidate tests reported 27 pass / 10 fail on path-only behavior.
+- After correction: 614 native tests pass, including actual Pi read output through Responses serialization; strict TypeScript and shared instruction-core checks pass.
+- Isolated Pi 0.85.1 SDK/provider-fetch replay: both page sentinels survive extension off/on, failed reread, and partial reread. Four synthetic requests; no paid calls.
+- One focused readiness review found no functional defects or validation gaps. Its stale pruner-comment finding was corrected; no further review cycle.
