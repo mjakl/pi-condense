@@ -294,6 +294,29 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
 }
 
 describe("full-result quality", () => {
+  it("accounts for a rejected first summary without frontier completion, including reload", async () => {
+    const previous = streamImpl;
+    const usage = { ...USAGE, cost: { ...USAGE.cost, total: 0.02 } };
+    streamImpl = () => ({ async *[Symbol.asyncIterator]() {}, async result() {
+      return { stopReason: "stop", content: [{ type: "text", text: "oversized summary" }], usage };
+    } });
+    try {
+      const h = await boot({ branch: pendingBatchEntries("charged", "x", 100) });
+      const costs: any[] = [];
+      h.pi.events.emit = (channel: string, payload: any) => { if (channel === "cost:external") costs.push(payload); };
+      const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
+      for (const expectedCost of [0.02, 0.04]) {
+        await h.handlers.get("session_start")!({}, h.ctx);
+        await h.handlers.get("message_end")!(finish, h.ctx);
+        const stats = h.appended.filter(e => e.type === "context-prune-stats");
+        expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(expectedCost);
+        expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.02, inputTokens: 1, outputTokens: 1 });
+        expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      }
+      expect(costs).toHaveLength(2);
+    } finally { streamImpl = previous; }
+  });
+
   it.each(["error", "length", "oversized", "budget"])("%s retains large originals through automatic/manual compression and reload", async mode => {
     const previous = streamImpl;
     const raw = "body ".repeat(30_000) + "TAIL: exact diagnosis and cleanup condition";

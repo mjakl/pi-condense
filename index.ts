@@ -515,6 +515,9 @@ export default function (pi: ExtensionAPI) {
         statsAccum.add(result.usage);
         if (summaryText.length > batchRawCharCount) {
           safeNotify(ctx, `pruner: summary exceeds raw output for turn ${batch.turnIndex}; originals retained, batch remains pending`, "warning");
+          // The provider charged for this response even though no frontier may advance.
+          persistAlias(CUSTOM_TYPE_STATS, statsAccum.getStats());
+          emitExternalCost(pi, statsAccum);
           firstFailureIndex = i;
           break;
         }

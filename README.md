@@ -94,13 +94,13 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 
 Diagnostics remain in `context-prune-diagnostic` session entries only, never in the footer or the model's context. Full mechanics: [PRUNING.md § Diagnostics](PRUNING.md#diagnostics).
 
-### Uncovered chains compress too
+### Preserve evidence before compressing chains
 
 `/pruner compact` and automatic flush require observed summaries for every unprotected tool-result occurrence before dropping a chain. Failed, unsupported, trivial or only partially summarized outputs stay in context rather than becoming metadata-only stubs. Historical deterministic chain entries remain readable. See [summary coverage before chain compression](PRUNING.md#summary-coverage-before-chain-compression).
 
 The summarizer receives complete captured text, without a per-result character cutoff. Failed, length-truncated, estimated-over-budget or larger-than-raw summaries leave the batch pending and originals intact. `context_tree_query` output is always protected from lossy re-summarization, including after chain relocation. Non-text results stay raw because the summarizer is text-only. This uses more summarizer input and may retain more main-agent context; it does not guarantee lossless LLM summaries or change the query tool's explicit response limit.
 
-**Limitation:** a chain stranded in an otherwise-idle session is not healed by `/pruner now` on an empty queue (the flush returns early before chain detection runs at all) - it heals on the next flush that has any work, or immediately via `/pruner compact`.
+`/pruner compact` applies the same coverage gate; it cannot force unsummarized originals out of context. `/pruner now` returns before chain detection when the pending queue is empty.
 
 ### Context metrics (`context-prune-flush-metrics`)
 

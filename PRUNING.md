@@ -189,8 +189,7 @@ graph TB
 - Every summary uses `pi.sendMessage(..., { triggerTurn: false })`: Pi appends it to live state and persists it once at the completed tool boundary, without starting a turn (requires Pi >=0.84.4). The next request may have snapshotted messages before that delivery drained, so the `context` hook adds missing summaries from `buildContextEntries()` before pruning. Content equality deduplicates live/reloaded summaries; the active-entry boundary prevents resurrection of compacted summaries.
 - The session JSONL file retains the original tool-result entries unchanged — pruning only affects what the *next* request sees in active context.
 - **Permanent recovery protection:** `context_tree_query` output never enters lossy tool-output summarization or re-stubbing. Chain compression relocates its text verbatim, including for historical chain entries without protection metadata. `recoveryGraceTurns` (default 3) still defers structural chain compression during the grace window; expiry no longer removes verbatim protection. The query tool's explicit response-size limit is unchanged.
-  - Enforced at **render time**, in Phase 1 stub-replace and in chain-compression eligibility — NOT at capture time. Capture-time exclusion would collide with frontier trim: a tool call already past the frontier is dropped forever, so excluding a recovered call from capture would either need to resurrect frontier state or degrade the lifetime bound into permanent verbatim retention for anything ever recovered.
-  - Trade-off: this bounds but does not eliminate regrowth. A tool call still referenced after its grace window expires is re-stubbed and may be re-queried again — the accepted cost of keeping the window's context-growth impact bounded instead of unbounded.
+  - Recovery calls are excluded at capture and protected again at render for historical records. Recovered text remains in context permanently, so repeated recovery can increase context size.
 
 ---
 
