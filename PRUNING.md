@@ -718,16 +718,29 @@ the resolved model differs from `ctx.model`):
   `auth` (pre-flight key failure) and `unusable` (empty / length-truncated)
   never trip the controller; a `transient` stream error / `stopReason: error`
   does. Aborts propagate unchanged.
-- **Enter:** a transient primary failure is retried once on the session model.
-  If that succeeds, the session flips to fallback and a one-time warning fires.
+- **Enter:** retry initial transient primary failures up to 3 times (4 primary
+  attempts total), waiting 3s, 9s, then 27s before the three retries (27s maximum).
+  The initial attempt is immediate. Stop early on success, auth failure, or
+  unusable output. After exhaustion, attempt the current session model once
+  immediately, without another delay. Primary attempts
+  keep configured reasoning; fallback omits reasoning options (provider default,
+  not session-selected reasoning). If fallback succeeds, the controller becomes
+  sticky and a one-time warning fires. If it fails, stop this call and retain
+  pending work for later triggers; the session is not paused.
+- **Attempt scope:** idle and maximum timeouts apply separately to each attempt,
+  not to retry waits. Cancellation interrupts waits and prevents subsequent
+  attempts. Same-model and no-controller calls
+  retain their single-attempt behavior.
 - **Sticky + probe:** while in fallback, all calls route to the session model.
   After a 3-minute cooldown (`COOLDOWN_MS`, internal, not configurable) one
-  batch of the next flush probes the primary; success recovers (info notify),
-  failure stays in fallback.
+  batch of the next flush probes the primary once, without the 3 retries;
+  success recovers (info notify), transient failure gets one fallback attempt.
+  During cooldown, each call gets just one fallback attempt.
 - **In-memory only:** no `context-prune-*` entry; `reset()` on `session_start`.
   A restart mid-outage re-detects on the next flush.
 
-Cost note: the initial detection flush can fire up to N doomed primary calls
+Cost note: the initial detection flush can fire up to 4N doomed primary attempts
+for N concurrent batches
 before the outage is known; steady state is 0 doomed calls, plus at most 1
 probe per 3 minutes. Probing is on demand: after the cooldown, the next
 summarization call tests the primary. A successful probe switches back from
