@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -119,6 +120,7 @@ async function runOnce(
   ctx: ExtensionContext,
   options: SummarizeBatchOptions
 ): Promise<RunOutcome> {
+  options.signal?.throwIfAborted();
   const context = {
     messages: [{ role: "user" as const, content: [{ type: "text" as const, text: userMessage }], timestamp: Date.now() }],
   };
@@ -166,6 +168,8 @@ async function runOnce(
     const effectiveModel = providerAuth?.auth.baseUrl
       ? { ...model, baseUrl: providerAuth.auth.baseUrl }
       : model;
+
+    options.signal?.throwIfAborted();
 
     // Pass the combined signal so the underlying fetch is cancelled immediately
     // either when the user presses Esc, or when an idle/ceiling timeout fires.
@@ -261,9 +265,9 @@ async function runOnce(
  * detect options.signal.aborted and restore state without a UI error.
  *
  * When options.controller is set AND a distinct fallback model exists, a
- * transient failure of the configured summarizer model is retried once on the
- * session model, and the controller stays sticky in fallback until a
- * per-cooldown probe of the primary succeeds.
+ * initial transient failures get three primary retries, then one session-model
+ * attempt with provider-default reasoning. Fallback stays sticky until a
+ * single-attempt per-cooldown probe of the primary succeeds.
  */
 async function runSummarization(
   userMessage: string,
@@ -313,8 +317,17 @@ async function runSummarization(
   };
 
   const decision = controller.chooseTarget();
+  const fallbackConfig = { ...config, summarizerThinking: "default" as const };
   const model = decision.target === "primary" ? primary : sessionModel;
-  const r = await runOnce(model, userMessage, config, ctx, options);
+  let r = await runOnce(model, userMessage, decision.target === "primary" ? config : fallbackConfig, ctx, options);
+  // Cooldown probes stay single-shot; only initial primary calls get retries.
+  if (decision.target === "primary" && !decision.wasProbe) {
+    for (const delayMs of [3000, 9000, 27000]) {
+      if (r.kind !== "transient") break;
+      await delay(delayMs, undefined, { signal: options.signal });
+      r = await runOnce(primary, userMessage, config, ctx, options);
+    }
+  }
 
   switch (r.kind) {
     case "ok":
@@ -332,8 +345,8 @@ async function runSummarization(
         notifyFailure(r);
         return null;
       }
-      // target was primary (initial detection or probe): retry once on the session model.
-      const r2 = await runOnce(sessionModel, userMessage, config, ctx, options);
+      // Primary retries exhausted (or single probe failed): one fallback attempt.
+      const r2 = await runOnce(sessionModel, userMessage, fallbackConfig, ctx, options);
       if (r2.kind === "ok") {
         emit(controller.onPrimaryFailFallbackOk(decision.wasProbe));
         return r2.result; // suppress the legacy error notify — fallback rescued the call

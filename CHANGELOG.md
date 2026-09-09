@@ -11,6 +11,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 - Send complete captured text to the summarizer instead of a silent 2,000-character prefix. Reject estimated-over-budget inputs without truncating; failed, length-truncated and larger-than-raw summaries keep originals pending without advancing the frontier. Remove eager preview-only replacement of large results. New chain drops require full observed summary coverage, so unsummarized evidence stays in context. Always preserve `context_tree_query` output verbatim through later pruning and chain relocation; retain non-text results rather than summarizing only their text. This favors quality over compression and can increase summarizer cost and retained context. Existing archives and historical chain entries remain readable.
 
+- Retry initial transient summarizer failures up to 3 times (4 primary attempts), waiting 3s, 9s, then 27s (maximum) before retries. The initial attempt and the single distinct-session-model fallback are immediate; fallback uses provider-default reasoning. Cancellation interrupts retry waits. Failed fallback calls retain pending work for later triggers. Sticky fallback, single-attempt cooldown probes, and same-model eligibility are unchanged; timeouts remain per attempt.
+
 - Shorten the configured summarizer model's fallback re-probe cooldown from 10 minutes to 3 minutes. Probing remains on demand at the next summarization call after the cooldown; the duration remains internal and not configurable.
 
 - Simplify the footer to literal `prune: on` when enabled and visible; show nothing when disabled or hidden. Remove footer dividers, activity labels, savings, and diagnostic counters without changing configuration or pruning behavior.
