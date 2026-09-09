@@ -126,6 +126,12 @@ These are most informative for long single-chain sessions where Phase 3 (chain c
 
 Published to npm as [`pi-condense`](https://www.npmjs.com/package/pi-condense).
 
+Requires Node.js >=22.19.0 and `@earendil-works/pi-coding-agent` >=0.84.4.
+Pi 0.84.4 fixes non-turn custom-message delivery at tool boundaries; older hosts
+can insert summaries between calls and results or start unwanted turns.
+Development dependencies pin Pi 0.85.1; the full suite also passes on Pi 0.84.4.
+The existing `@sinclair/typebox` 0.34 ecosystem is retained.
+
 **User scope** (all repos under your pi profile):
 
 ```bash
