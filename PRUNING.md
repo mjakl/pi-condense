@@ -20,7 +20,7 @@
    - [Eager single-result spill](#eager-single-result-spill)
    - [Trivial-batch skip (minBatchChars)](#trivial-batch-skip-minbatchchars)
    - [Content-hash dedup](#content-hash-dedup)
-   - [Oversized summary skip](#oversized-summary-skip)
+   - [Oversized summary rejection](#oversized-summary-rejection)
    - [Frontier persistence](#frontier-persistence)
    - [Other UI / observability features](#other-ui--observability-features)
    - [Token-budget auto-flush trigger](#token-budget-auto-flush-trigger)
@@ -643,7 +643,7 @@ Keep the session's `-blobs/` directory when moving its JSONL. Without it, histor
 
 `minBatchChars: number` (default `1000`) is a pre-flush guard against "summary would be roughly the same size as the input" cases. If the total raw `resultText` across a batch is below the threshold, the batch is skipped: no summarizer LLM call, no `context-prune-index` entry, no `context-prune-summary` injection. The frontier still advances, so the same tool calls are not reconsidered next flush.
 
-Why it exists: a short LLM summary like "Tool X did Y" is itself ~50–150 chars per call. For a 200-byte file read or an `ls` of a short directory, the summary is the same size or larger than the input — the post-call `skipped-oversized` mechanism would catch it anyway, but only after the LLM round-trip and the cost. `minBatchChars` short-circuits the obvious cases at zero LLM cost.
+Why it exists: a short LLM summary like "Tool X did Y" is itself ~50–150 chars per call. For a 200-byte file read or an `ls` of a short directory, the summary is the same size or larger than the input — the post-call oversized rejection would catch it anyway, but only after the LLM round-trip and the cost. `minBatchChars` short-circuits the obvious cases at zero LLM cost.
 
 Set `minBatchChars: 0` to disable. The default `1000` skips obvious trivial batches (`git status`, small file reads, short directory listings) without affecting realistic tool outputs. Edit with `/pruner min-batch-chars <n>` or via the settings overlay.
 
@@ -669,15 +669,15 @@ Typical wins: re-reading an unchanged file, repeated `git status` / `ls`, retrie
 
 Edit with `/pruner dedup on|off|status` or the settings overlay.
 
-### Oversized summary skip
+### Oversized summary rejection
 
-Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context, no summary is injected, and the frontier still advances so the next prune attempt starts after this range instead of retrying it. The `quietOversizedSkips` config silences the info notification (the skip itself still happens).
+Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context, no summary is injected, the batch stays pending, and the frontier does not advance. The call's usage is still recorded in `context-prune-stats` and `cost:external`, and a warning is always shown; `quietOversizedSkips` silences only trivial/dedup info notifications. After rejection the batch is handled like a failed or length-truncated summary (see [Pre-flush Pipeline & Safeguards](#pre-flush-pipeline--safeguards)).
 
-This is rare in practice once `minBatchChars` is on, because the cases where summarization makes things bigger are exactly the cases the trivial-batch skip already catches earlier.
+This is rare in practice once `minBatchChars` is on, because the cases where summarization makes things bigger are exactly the cases the trivial-batch skip already catches earlier. A batch rejected again on the next flush is charged again; there is no rejection backoff.
 
 ### Frontier persistence
 
-The last attempted prune boundary is persisted as `context-prune-frontier` so `flushPending` knows where the previous attempt left off, even if that attempt was a skip rather than a real summary. Without this, a batch that's been skipped as oversized would be re-attempted (with the same LLM call, the same oversize result, the same skip) on every subsequent flush.
+The last completed prune boundary is persisted as `context-prune-frontier` so `flushPending` knows where the previous flush left off, even if that flush only skipped trivial or deduplicated batches. Rejected summaries leave the frontier in place, so their batches are re-attempted on the next flush instead of being lost.
 
 ### Other UI / observability features
 
@@ -1013,7 +1013,7 @@ Neither knob makes a chain close; they just keep Phase 1 flushing on schedule so
 |---|---|
 | Open-cycle thinking tokens | Est. tokens of `thinking` content blocks in assistant messages strictly after the last text-only assistant reply (the open segment). Not windowed by the frontier, so a skip/oversized/trivial outcome (which advances the frontier without removing anything from context) never masks stranded thinking as ~0. |
 | Largest-chain share | `max(largest closed chain, open segment)` chars, as a percentage of total branch chars. Interrupted chains count as closed for this purpose - they are retained context regardless of compressibility. A single-chain session's whole branch is its open segment, so this reads near 100% for the incident shape. |
-| Frontier gap | Est. tokens of `ToolResultMessage`s after the persisted prune frontier that are summarization-eligible: not already summarized, not protected (`protectedTools`/`protectedPaths`). 0 when there is nothing left to capture. |
+| Frontier gap | Est. tokens of `ToolResultMessage`s after the persisted prune frontier that are summarization-eligible: not already summarized, not protected (`protectedTools`/`protectedPaths`), not non-text (image results stay raw). 0 when there is nothing left to capture. |
 
 See `doc/specs/2026-08-12-single-chain-observability-trigger-repair.md` for the incident and full design rationale.
 

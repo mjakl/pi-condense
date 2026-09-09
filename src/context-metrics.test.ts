@@ -260,6 +260,13 @@ describe("computeContextMetrics", () => {
     expect(result.frontierGapTokens).toBe(expected);
   });
 
+  test("frontierGapTokens: non-text results never enter the summarizer, so they are not a gap", () => {
+    const image = { ...toolResult(300, "tc1"), content: [{ type: "image", data: "..." }] };
+    const msgs = [userMsg(100), assistantWithTools(200, ["tc1", "tc2"]), image, toolResult(310, "tc2")];
+    const result = computeContextMetrics(msgs, null, noSummarized, noProtected);
+    expect(result.frontierGapTokens).toBe(Math.round(JSON.stringify(msgs[3]).length / 4));
+  });
+
   test("frontierGapTokens: boundary mid-turn split excludes at-or-before calls, includes later calls in same turn", () => {
     const msgs = [userMsg(100), assistantWithTools(200, ["tc1", "tc2"]), toolResult(300, "tc1"), toolResult(310, "tc2")];
     const frontier = fullFrontier({ lastAttemptedToolCallId: "tc1", lastAttemptedTurnIndex: 0 });

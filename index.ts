@@ -450,6 +450,16 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Every completed call was charged, whether or not the ordered
+      // publication below reaches it; record usage before the loop can stop.
+      let charged = false;
+      for (const r of results) {
+        if (r !== null && typeof r === "object") {
+          statsAccum.add(r.usage);
+          charged = true;
+        }
+      }
+
       // Process results in order; stop at first null (individual call failure).
       // Batches before the first failure are persisted; remaining are restored to
       // pendingBatches so they are retried on the next flush.
@@ -512,12 +522,8 @@ export default function (pi: ExtensionAPI) {
         const toolNames = batch.toolCalls.map((tc) => tc.toolName);
         const decorated = substituteInlineRefs(result.summaryText, summaryRefs, toolNames);
         const summaryText = decorated + formatSummaryToolCallRefs(summaryRefs);
-        statsAccum.add(result.usage);
         if (summaryText.length > batchRawCharCount) {
           safeNotify(ctx, `pruner: summary exceeds raw output for turn ${batch.turnIndex}; originals retained, batch remains pending`, "warning");
-          // The provider charged for this response even though no frontier may advance.
-          persistAlias(CUSTOM_TYPE_STATS, statsAccum.getStats());
-          emitExternalCost(pi, statsAccum);
           firstFailureIndex = i;
           break;
         }
@@ -555,7 +561,15 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (processedBatches.length === 0) {
-        // Nothing was persisted (all calls failed or first call failed)
+        // Nothing was published, but completed calls were still charged.
+        if (charged) {
+          try {
+            persistAlias(CUSTOM_TYPE_STATS, statsAccum.getStats());
+          } catch {
+            // Best-effort like the post-loop stats write; the in-memory total carries to the next flush.
+          }
+          emitExternalCost(pi, statsAccum);
+        }
         outcome = "error";
         return { ok: false, reason: "summarizer-failed" };
       }

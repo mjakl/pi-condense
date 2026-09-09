@@ -317,6 +317,27 @@ describe("full-result quality", () => {
     } finally { streamImpl = previous; }
   });
 
+  it("records usage for every completed parallel call when the first summary is rejected", async () => {
+    const previous = streamImpl;
+    const usage = { ...USAGE, cost: { ...USAGE.cost, total: 0.02 } };
+    streamImpl = (_model, input) => ({ async *[Symbol.asyncIterator]() {}, async result() {
+      // Any summary is oversized for the 1-char first batch; the second accepts a short one.
+      const text = input.messages[0].content[0].text.includes("yyyy") ? "ok" : "oversized summary";
+      return { stopReason: "stop", content: [{ type: "text", text }], usage };
+    } });
+    try {
+      const h = await boot({ branch: [...pendingBatchEntries("first", "x", 100), ...pendingBatchEntries("second", "y".repeat(200), 2000)] });
+      const costs: any[] = [];
+      h.pi.events.emit = (channel: string, payload: any) => { if (channel === "cost:external") costs.push(payload); };
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, h.ctx);
+      const stats = h.appended.filter(e => e.type === "context-prune-stats");
+      expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(0.04);
+      expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.04, inputTokens: 2, outputTokens: 2 });
+      expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+    } finally { streamImpl = previous; }
+  });
+
   it.each(["error", "length", "oversized", "budget"])("%s retains large originals through automatic/manual compression and reload", async mode => {
     const previous = streamImpl;
     const raw = "body ".repeat(30_000) + "TAIL: exact diagnosis and cleanup condition";

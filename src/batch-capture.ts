@@ -28,6 +28,11 @@ function projectCustomMessageEntry(e: any): any {
 }
 
 /** Joins the text blocks of a ToolResultMessage into a single string. */
+/** Text-only summarization cannot represent images; such results stay raw for good. */
+export function hasNonTextContent(toolResult: any): boolean {
+  return toolResult?.content?.some((c: any) => c.type !== "text") ?? false;
+}
+
 export function extractToolResultText(msg: any): string {
   const content: any[] = Array.isArray(msg?.content) ? msg.content : [];
   return content
@@ -56,10 +61,9 @@ export function captureBatch(
     .join("\n")
     .trim();
 
-  // Text-only summarization cannot represent images; keep those results raw.
   const toolCalls: CapturedToolCall[] = content
     .filter((block: any) => block.type === "toolCall" &&
-      !toolResults.find((result: any) => result.toolCallId === block.id)?.content?.some((c: any) => c.type !== "text"))
+      !hasNonTextContent(toolResults.find((result: any) => result.toolCallId === block.id)))
     .map((block: any) => {
       const match = toolResults.find((result: any) => result.toolCallId === block.id);
 
