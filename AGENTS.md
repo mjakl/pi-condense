@@ -100,7 +100,7 @@ src/
   commands.ts                      # /pruner subcommands, settings overlay, status widget
   summarizer.ts                    # LLM summarization calls (per-batch + range fusion via shared runSummarization)
   summarizer-fallback.ts           # pure: sticky in-memory FallbackController for summarizer-model outages (transient-only, 10-min re-probe)
-  supersede.ts                     # pure: newest protected read per args.path wins; older ones stubbed once SupersedeState.floor says the prefix is being rewritten anyway (or cache is cold)
+  supersede.ts                     # pure: only identical successful protected text reads per args.path supersede older copies; existing cache-floor cadence applies
   context-metrics.ts               # pure: branch -> ContextMetricsSnapshot (open-cycle thinking, chain share, frontier gap)
   stats.ts                         # StatsAccumulator + formatting helpers
   test-support.ts                  # shared test helpers (e.g. expectNoOrphanToolResults) used across multiple *.test.ts files

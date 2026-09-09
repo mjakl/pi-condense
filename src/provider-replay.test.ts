@@ -2,6 +2,12 @@ import { expect, it } from "bun:test";
 import { convertResponsesMessages } from "../node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js";
 import { ToolCallIndexer } from "./indexer.js";
 import { pruneMessages } from "./pruner.js";
+import { createReadTool } from "@earendil-works/pi-coding-agent";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createSupersedeState } from "./supersede.js";
+import { isProtected } from "./protected.js";
 
 // Synthetic provider metadata, not a claim about the user's private codex-lb configuration.
 const model: any = { id: "synthetic", provider: "codex-lb", api: "openai-responses", input: ["text"] };
@@ -31,6 +37,55 @@ it("stub replacement preserves Responses reasoning items and call/output identit
   expect(payload.find((item: any) => item.type === "function_call_output")).toMatchObject({ call_id: "call_fixture" });
   expect(JSON.stringify(payload)).toContain("context_tree_query");
   expect(messages[2].content[0].text).toBe("original output");
+});
+
+it.each(["pages", "failed", "partial"])("Responses replay retains protected page evidence after %s reads", async (kind) => {
+  const dir = await mkdtemp(join(tmpdir(), "protected-read-replay-"));
+  try {
+    const path = join(dir, "SKILL.md");
+    await writeFile(path, Array.from({ length: 800 }, (_, i) =>
+      i === 0 ? "PAGE_ONE_MANDATORY_COPPER" : i === 400 ? "PAGE_TWO_MANDATORY_VIOLET" : `line ${i + 1}`,
+    ).join("\n"));
+    const read = createReadTool(dir);
+    const replay: any[] = [{ role: "user", content: "Read both pages", timestamp: 1 }];
+    async function addRead(offset: number, limit: number) {
+      const id = `call_${replay.length}|fc_${replay.length}`;
+      const args = { path, offset, limit };
+      replay.push({ role: "assistant", api: model.api, provider: model.provider, model: model.id,
+        stopReason: "toolUse", timestamp: replay.length + 1,
+        content: [{ type: "toolCall", id, name: "read", arguments: args }] });
+      let content;
+      let isError = false;
+      try {
+        content = (await read.execute(id, args)).content;
+      } catch (error) {
+        isError = true;
+        content = [{ type: "text", text: String(error) }];
+      }
+      replay.push({ role: "toolResult", toolCallId: id, toolName: "read", content, isError, timestamp: replay.length + 1 });
+    }
+    await addRead(1, 400);
+    await addRead(401, 400);
+    if (kind === "failed") await addRead(801, 1); // Real out-of-bounds read failure.
+    if (kind === "partial") await addRead(401, 1);
+    const before = JSON.stringify(replay);
+    const protection = { protectedTools: ["read"], protectedPaths: [] };
+    const state = createSupersedeState();
+    state.floor = 0;
+    const rendered = pruneMessages(replay, new ToolCallIndexer(), undefined, undefined, protection, 0, undefined, {
+      state, isProtected: (name, args) => isProtected(name, args, protection),
+    });
+    for (const messages of [replay, rendered.messages]) {
+      const payload = convertResponsesMessages(model, { messages }, new Set([model.provider]));
+      const results = payload.filter((item: any) => item.type === "function_call_output");
+      expect(results.length).toBe(kind === "pages" ? 2 : 3);
+      expect(JSON.stringify(results)).toContain("PAGE_ONE_MANDATORY_COPPER");
+      expect(JSON.stringify(results)).toContain("PAGE_TWO_MANDATORY_VIOLET");
+    }
+    expect(JSON.stringify(replay)).toBe(before);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 it("malformed stored Responses reasoning fails even without condense transformations", () => {

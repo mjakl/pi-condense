@@ -1068,7 +1068,7 @@ describe("pruneMessages phase 1b (supersede)", () => {
     return [
       { role: "user", timestamp: 1, content: [{ type: "text", text: "go" }] },
       { role: "assistant", timestamp: 2, content: [{ type: "toolCall", id: "r1", name: "read", input: { path: SKILL } }] },
-      { role: "toolResult", toolCallId: "r1", toolName: "read", content: [{ type: "text", text: "FIRST" }], isError: false, timestamp: 3 },
+      { role: "toolResult", toolCallId: "r1", toolName: "read", content: [{ type: "text", text: "SECOND" }], isError: false, timestamp: 3 },
       { role: "assistant", timestamp: 4, content: [{ type: "text", text: "ok" }] },
       { role: "user", timestamp: 5, content: [{ type: "text", text: "again" }] },
       { role: "assistant", timestamp: 6, content: [{ type: "toolCall", id: "r2", name: "read", input: { path: SKILL } }] },
@@ -1106,8 +1106,9 @@ describe("pruneMessages phase 1b (supersede)", () => {
     expectNoOrphanToolResults(out);
   });
 
-  it("superseded read inside a compressed chain relocates as the stub", () => {
+  it.each([false, true])("protected read relocation preserves distinct output (distinct=%s)", (distinct) => {
     const msgs = twoReads();
+    if (distinct) msgs[2].content[0].text = "FIRST";
     const entry = {
       blockId: "b1",
       startUserTimestamp: 1,
@@ -1123,8 +1124,8 @@ describe("pruneMessages phase 1b (supersede)", () => {
     const { messages: out } = pruneMessages(msgs, indexer, enabledCC, undefined, protection, 0, undefined, { state, isProtected: isProt });
     const synthetic = out.find((m: any) => typeof m.content?.[0]?.text === "string" && m.content[0].text.startsWith("<compressed-chain"));
     expect(synthetic.content[0].text).toContain('<protected-output tool="read">');
-    expect(synthetic.content[0].text).toContain(supersededStub(SKILL));
-    expect(synthetic.content[0].text).not.toContain("FIRST");
+    expect(synthetic.content[0].text).toContain(distinct ? "FIRST" : supersededStub(SKILL));
+    expect(synthetic.content[0].text).not.toContain("SECOND");
     expect(out.find((m: any) => m.role === "toolResult" && m.toolCallId === "r2").content[0].text).toBe("SECOND");
     expectNoOrphanToolResults(out);
   });

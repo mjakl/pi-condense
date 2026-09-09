@@ -21,7 +21,7 @@ const OTHER = "/h/skills/y/SKILL.md";
 function call(id: string, ts: number, args: unknown, name = "read", argKey: "input" | "args" | "arguments" = "input"): any[] {
   return [
     { role: "assistant", timestamp: ts, content: [{ type: "toolCall", id, name, [argKey]: args }] },
-    { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: `BODY-${id}` }], isError: false, timestamp: ts + 1 },
+    { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: "BODY" }], isError: false, timestamp: ts + 1 },
   ];
 }
 
@@ -42,9 +42,62 @@ describe("findSuperseded", () => {
     expect(findSuperseded(msgs, prot).map((c) => c.toolCallId)).toEqual(["a", "b"]);
   });
 
-  test("different offset/limit slices of one path -> older is a candidate", () => {
-    const msgs = [...call("a", 10, { path: SKILL, offset: 1, limit: 400 }), ...call("b", 20, { path: SKILL, offset: 400, limit: 50 })];
+  test.each([
+    [{ path: SKILL, offset: 1, limit: 400 }, { path: SKILL, offset: 401, limit: 400 }],
+    [{ path: SKILL }, { path: SKILL, offset: 401, limit: 1 }],
+    [{ path: SKILL }, { path: SKILL }],
+  ])("distinct output is retained regardless of read arguments: %j -> %j", (first, second) => {
+    const msgs = [...call("a", 10, first), ...call("b", 20, second)];
+    msgs[1].content[0].text = "PAGE_ONE_MANDATORY_COPPER";
+    msgs[3].content[0].text = "PAGE_TWO_MANDATORY_VIOLET";
+    const state = createSupersedeState();
+    state.floor = 0;
+    expect(applySupersede(msgs, state, prot)).toBe(msgs);
+    expect(findSuperseded(msgs, prot)).toEqual([]);
+  });
+
+  test("failed reread cannot remove either page", () => {
+    const msgs = [
+      ...call("a", 10, { path: SKILL, offset: 1, limit: 400 }),
+      ...call("b", 20, { path: SKILL, offset: 401, limit: 400 }),
+      ...call("failed", 30, { path: SKILL }),
+    ];
+    msgs[1].content[0].text = "PAGE_ONE_MANDATORY_COPPER";
+    msgs[3].content[0].text = "PAGE_TWO_MANDATORY_VIOLET";
+    msgs[5].isError = true;
+    msgs[5].content[0].text = "EACCES";
+    const state = createSupersedeState();
+    state.floor = 0;
+    expect(applySupersede(msgs, state, prot)).toBe(msgs);
+  });
+
+  test("non-read tools carrying protected paths do not supersede reads", () => {
+    const msgs = [...call("a", 10, { path: SKILL }), ...call("b", 20, { path: SKILL }, "phase_tracker")];
+    expect(findSuperseded(msgs, prot)).toEqual([]);
+    expect(findSuperseded([...call("a", 10, { path: SKILL }, "phase_tracker"), ...call("b", 20, { path: SKILL })], prot)).toEqual([]);
+  });
+
+  test("nontext results do not participate even when identical", () => {
+    const msgs = [...call("a", 10, { path: SKILL }), ...call("b", 20, { path: SKILL })];
+    for (const i of [1, 3]) msgs[i].content.push({ type: "image", mimeType: "image/png", data: "fixture" });
+    expect(findSuperseded(msgs, prot)).toEqual([]);
+  });
+
+  test("all text blocks and continuation notices must match", () => {
+    const msgs = [...call("a", 10, { path: SKILL }), ...call("b", 20, { path: SKILL })];
+    msgs[1].content.push({ type: "text", text: "[400 more lines in file. Use offset=401 to continue.]" });
+    expect(findSuperseded(msgs, prot)).toEqual([]);
+  });
+
+  test("a later exact copy supersedes only matching content, not intervening distinct evidence", () => {
+    const msgs = [...call("a", 10, { path: SKILL }), ...call("b", 20, { path: SKILL }), ...call("c", 30, { path: SKILL })];
+    msgs[3].content[0].text = "DISTINCT";
     expect(findSuperseded(msgs, prot).map((c) => c.toolCallId)).toEqual(["a"]);
+  });
+
+  test("identical page output can supersede its earlier copy", () => {
+    const args = { path: SKILL, offset: 401, limit: 400 };
+    expect(findSuperseded([...call("a", 10, args), ...call("b", 20, args)], prot).map((c) => c.toolCallId)).toEqual(["a"]);
   });
 
   test("two paths interleaved -> per-path winners and candidates", () => {
@@ -108,8 +161,8 @@ describe("findSuperseded", () => {
     const s = createSupersedeState();
     s.floor = 0;
     const pruned = applySupersede(msgs, s, prot);
-    expect(pruned[3].content[0].text).toBe("BODY-X");   // bash result untouched
-    expect(pruned[7].content[0].text).toBe("BODY-X");   // newest read untouched
+    expect(pruned[3].content[0].text).toBe("BODY");   // bash result untouched
+    expect(pruned[7].content[0].text).toBe("BODY");   // newest read untouched
     expect(pruned[1].content[0].text).toBe(supersededStub(SKILL));
     expect(pruned[5].content[0].text).toBe(supersededStub(SKILL));
   });
@@ -247,6 +300,16 @@ describe("applySupersede", () => {
     expect(applySupersede(onlyOld, s, prot)).toBe(onlyOld);
   });
 
+  test.each(["changed", "failed"])("activated candidate returns verbatim if its replacement becomes %s", (kind) => {
+    const state = createSupersedeState();
+    state.floor = 0;
+    const msgs = two();
+    expect(applySupersede(msgs, state, prot)[1].content[0].text).toBe(supersededStub(SKILL));
+    if (kind === "failed") msgs[3].isError = true;
+    else msgs[3].content[0].text = "CHANGED";
+    expect(applySupersede(msgs, state, prot)).toBe(msgs);
+  });
+
   test("candidate with undefined timestamp: not activated by positional floor, activated by floor 0", () => {
     const s = createSupersedeState();
     const msgs = two();
@@ -264,20 +327,18 @@ describe("applySupersede", () => {
     const msgs = [...call("dup", 10, { path: SKILL }), ...call("dup", 20, { path: SKILL }), ...call("dup", 30, { path: SKILL })];
     s.floor = 21;
     const out = applySupersede(msgs, s, prot);
-    expect(out[1].content[0].text).toBe("BODY-dup");
+    expect(out[1].content[0].text).toBe("BODY");
     expect(out[3].content[0].text).toBe(supersededStub(SKILL));
-    expect(out[5].content[0].text).toBe("BODY-dup");
+    expect(out[5].content[0].text).toBe("BODY");
     expect([...s.activated]).toEqual([occKey("dup", 21)]);
   });
 
-  test("newest read errored still wins", () => {
+  test.each(["ENOENT", "BODY"])("failed latest read never supersedes successful evidence: %s", (text) => {
     const s = createSupersedeState();
     s.floor = 0;
     const msgs = two();
-    msgs[3] = { ...msgs[3], isError: true, content: [{ type: "text", text: "ENOENT" }] };
-    const out = applySupersede(msgs, s, prot);
-    expect(out[1].content[0].text).toBe(supersededStub(SKILL));
-    expect(out[3]).toBe(msgs[3]);
+    msgs[3] = { ...msgs[3], isError: true, content: [{ type: "text", text }] };
+    expect(applySupersede(msgs, s, prot)).toBe(msgs);
   });
 
   test("A < B < C: A and B stubbed, C verbatim", () => {
@@ -290,13 +351,11 @@ describe("applySupersede", () => {
     expect(out[5]).toBe(msgs[5]);
   });
 
-  test("superseded candidate that had errored is stubbed with isError false", () => {
+  test("failed earlier read stays outside supersession", () => {
     const s = createSupersedeState();
     s.floor = 0;
     const msgs = two();
     msgs[1] = { ...msgs[1], isError: true, content: [{ type: "text", text: "EACCES" }] };
-    const out = applySupersede(msgs, s, prot);
-    expect(out[1].isError).toBe(false);
-    expect(out[1].content[0].text).toBe(supersededStub(SKILL));
+    expect(applySupersede(msgs, s, prot)).toBe(msgs);
   });
 });
