@@ -389,12 +389,6 @@ export default function (pi: ExtensionAPI) {
         if (!isTrivial[i] && !isFullyDeduped[i]) nonTrivialIndices.push(i);
       }
 
-      // Only show "summarizing…" if at least one batch will actually be sent
-      // to the LLM. An all-trivial flush is purely bookkeeping.
-      if (nonTrivialIndices.length > 0) {
-        setPruneStatusWidget(ctx, currentConfig.value, "prune: summarizing…");
-      }
-
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
       };
@@ -566,7 +560,7 @@ export default function (pi: ExtensionAPI) {
 
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed or first call failed)
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+        setPruneStatusWidget(ctx, currentConfig.value);
         outcome = "error";
         return { ok: false, reason: "summarizer-failed" };
       }
@@ -643,7 +637,7 @@ export default function (pi: ExtensionAPI) {
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
-      setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+      setPruneStatusWidget(ctx, currentConfig.value);
       emitExternalCost(pi, statsAccum);
 
       // Chain compression — compress closed chains beyond the rolling window.
@@ -771,7 +765,7 @@ export default function (pi: ExtensionAPI) {
       // When the abort signal fired, summarizeBatch rethrows rather than
       // swallowing the error.  Don't show a UI error — the user intended this.
       if (options.signal?.aborted) {
-        setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+        setPruneStatusWidget(ctx, currentConfig.value);
         return { ok: false, reason: "aborted" };
       }
       if (isStaleContextError(err)) {
@@ -819,7 +813,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Update footer status
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+    setPruneStatusWidget(ctx, currentConfig.value);
 
     ctx.ui.setWidget(
       "pruner-boot",
@@ -858,7 +852,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+    setPruneStatusWidget(ctx, currentConfig.value);
   });
 
   // Cache is a per-model prefix; these three moments are cold regardless, so
@@ -938,7 +932,6 @@ export default function (pi: ExtensionAPI) {
           ? "agent's next text response"
           : "/pruner now";
         if (currentConfig.value.showPruneStatusLine) {
-          setPruneStatusWidget(ctx, currentConfig.value, `prune: ${n} pending`);
           safeNotify(
             ctx,
             `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
@@ -1004,19 +997,6 @@ export default function (pi: ExtensionAPI) {
     await flushPending(ctx, { delivery: "session", closingMessage: event.message, trigger: "message-end" });
   });
 
-  // ── agent_end: last-chance cleanup only ─────────────────────────────────────
-  // agent-message normally flushes on message_end. By agent_end, print-mode Pi may
-  // already be disposing the session, so avoid starting a best-effort LLM call here.
-  pi.on("agent_end", async (_event, ctx) => {
-    if (!currentConfig.value.enabled) return;
-    if (pendingBatches.length === 0 && !rearmedPending) return;
-    setPruneStatusWidget(
-      ctx,
-      currentConfig.value,
-      pendingBatches.length > 0 ? `prune: ${pendingBatches.length} pending` : "prune: recovered pending (reload)",
-    );
-  });
-
   // ── context: prune summarized tool results from next LLM call ─────────────
   pi.on("context", async (event, ctx) => {
     if (!currentConfig.value.enabled) return undefined;
@@ -1054,9 +1034,8 @@ export default function (pi: ExtensionAPI) {
     if (result.pruned) {
       messages = result.messages;
       changed = true;
-      statsAccum.setLiveReclaim(result.beforeChars, result.afterChars);
     }
-    setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getLiveReclaim(), diagnostics.counts());
+    setPruneStatusWidget(ctx, currentConfig.value);
 
     if (!changed) return undefined;
     return { messages };
@@ -1105,10 +1084,8 @@ export default function (pi: ExtensionAPI) {
     flushPending,
     capturePendingBatches,
     () => statsAccum.getStats(),
-    () => statsAccum.getLiveReclaim(),
     indexer,
     compactChains,
-    () => diagnostics.counts(),
     (ctx: any) => computeMetricsSnapshot(ctx) ?? EMPTY_METRICS_SNAPSHOT,
     () => rearmedPending,
   );

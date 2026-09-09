@@ -698,7 +698,8 @@ The last attempted prune boundary is persisted as `context-prune-frontier` so `f
 - **Tree browser (`/pruner tree`):** interactive, foldable tree of pruned tool calls grouped under their summaries. `Ctrl-O` on a summary node opens the full markdown summary in a bordered overlay.
 - **Configurable summarizer thinking (`summarizerThinking`):** trade summary cost / latency for quality (`off` / `minimal` / `low` / `medium` / `high` / `xhigh`). `default` omits the option entirely so the provider chooses.
 - **Cumulative stats:** `context-prune-stats` entries track input/output tokens and cost of every summarizer call; full detail surfaces in `/pruner stats`. Cost is also emitted on the `cost:external` pi.events channel for external aggregators (cumulative per session, live only).
-- **Live reclaim ratio:** measured once per `pruneMessages` call via `sizeMessages(messages) = JSON.stringify(messages).length`, comparing the input array before pruning to the result after. Estimated tokens = chars / 4. The measurement covers all five phases in a single point (stub-replace, supersede, error-purge, chain-range-prune, orphan-sweep); appears on the status line as `│ prune: ON · 92.0k->14.0k (-85%)` once at least one prune has occurred (the leading `│` keeps the segment visually isolated in the shared footer, load-order independent - there is no trailing divider, since the footer's own space-join between segments already provides one).
+- **Footer status:** literal `prune: on` when both `enabled` and `showPruneStatusLine` are true; otherwise nothing. No activity, counters, reclaim ratio, or diagnostics.
+- **Prune measurements:** `pruneMessages` still returns before/after character counts via `sizeMessages(messages) = JSON.stringify(messages).length`, covering all five phases (stub-replace, supersede, error-purge, chain-range-prune, orphan-sweep). These measurements are not shown in the footer.
 - **Live progress for `/pruner now`:** an `aboveEditor` widget shows one row per pending batch with braille spinner, streamed summary-char count, and ✓ / ⚠ status.
 
 ### Summarizer outage fallback
@@ -1017,7 +1018,7 @@ Phase 1 (per-batch summarization) is unaffected by chain closure and remains the
 
 Neither knob makes a chain close; they just keep Phase 1 flushing on schedule so raw toolResults do not pile up unsummarized for the whole run.
 
-**Observability metrics** (`src/context-metrics.ts`, `computeContextMetrics`) exist precisely to make this shape of session visible instead of silently reporting `calls: 1` the way the triggering incident did. All three are chars/4 token estimates (`Math.round`, same convention as the reclaim footer) and surface on `/pruner status` (a `--- context ---` block) and a `context-prune-flush-metrics` session entry written once per flush attempt regardless of outcome:
+**Observability metrics** (`src/context-metrics.ts`, `computeContextMetrics`) exist precisely to make this shape of session visible instead of silently reporting `calls: 1` the way the triggering incident did. Token counts use chars/4 estimates (`Math.round`); chain share is a percentage. These metrics surface on `/pruner status` (a `--- context ---` block) and a `context-prune-flush-metrics` session entry written once per flush attempt regardless of outcome:
 
 | Metric | Definition |
 |---|---|
@@ -1031,7 +1032,7 @@ See `doc/specs/2026-08-12-single-chain-observability-trigger-repair.md` for the 
 
 A reload (`session_start` or `session_tree`) rescans the branch for completed-but-unflushed tool-call batches past the frontier (the same rescan `flushPending` itself uses, no queue reconstruction). If that rescan finds recoverable work, a transient in-memory flag arms: the next `turn_end` evaluates the budget/delta trigger even on a turn that contributes no new tool results itself, instead of silently requiring a fresh batch to reach the gate. No flush runs at reload time - arming only changes what an *existing* trigger sees on the next turn.
 
-The flag clears the moment any flush attempt runs (any outcome) and is re-evaluated on the next reload. A reload followed by total idleness - no further turns at all - gets visibility only: the footer, `/pruner status`, and the `agent_end` pending notice (`prune: recovered pending (reload)`) all reflect the recoverable work, but nothing flushes automatically. This is by design - no immediate flush at boot (print-mode sessions may die under it; a boot-time compact was not requested by the user).
+The flag clears the moment any flush attempt runs (any outcome) and is re-evaluated on the next reload. After a reload, `/pruner status` reports recoverable work as `rearmed: yes`. If no further turns run, nothing flushes automatically. The footer does not reflect pending work. This is by design - no immediate flush at boot (print-mode sessions may die under it; a boot-time compact was not requested by the user).
 
 ---
 
@@ -1139,7 +1140,7 @@ Prune-time degradations - an unresolvable chain range, a detection/render id mis
 | `unresolved-range` | `applyChainCompressions` | A persisted chain entry's boundaries didn't resolve to a unique range (or the range was rejected as nested/duplicate) - the entry compressed nothing |
 | `range-id-mismatch` | `applyChainCompressions` | The ids actually inside a resolved range don't match the entry's recorded `droppedToolCallIds` - informational only, the range still wins |
 | `orphan-sweep` | `pruneMessages` (Phase 4) | One or more `toolResult` messages were removed for having no open matching `toolCall` |
-| `backfill-empty` | `chain-compressor.compressEligible` | An eligible chain has an unresolved span, missing occurrence timestamps, incomplete archive coverage, or zero extractable/indexed unprotected records - a genuine archival gap, not a partial-failure retry state. Fully-protected zero-coverage chains skip silently instead (see [Deterministic fallback § Fully-protected exception](#deterministic-fallback-uncovered-chains)). Deduped per chain start timestamp (`chain.startUserTimestamp`). Widget letter `b` |
+| `backfill-empty` | `chain-compressor.compressEligible` | An eligible chain has an unresolved span, missing occurrence timestamps, incomplete archive coverage, or zero extractable/indexed unprotected records - a genuine archival gap, not a partial-failure retry state. Fully-protected zero-coverage chains skip silently instead (see [Deterministic fallback § Fully-protected exception](#deterministic-fallback-uncovered-chains)). Deduped per chain start timestamp (`chain.startUserTimestamp`). |
 
 **Never in LLM context.** These are session entries only - zero tokens added, zero cache-prefix change, never read back into the message array the model sees.
 
@@ -1147,7 +1148,7 @@ Prune-time degradations - an unresolvable chain range, a detection/render id mis
 
 **Reset on `session_start` and `session_tree`**, matching every other in-memory, non-persisted piece of prune state.
 
-**Surfaced on the status line.** The footer status widget (`setPruneStatusWidget`, gated by `showPruneStatusLine`) appends a self-hiding ` · diag u<N>/m<N>/o<N>/b<N>` segment (u = `unresolved-range`, m = `range-id-mismatch`, o = `orphan-sweep`, b = `backfill-empty`) built from the sink's live counters via `pruneStatusText`. Each letter is omitted when its counter is zero, and the whole segment is absent when all four are zero. `/pruner status` (the slash command) prints a separate settings/stats block and does not include this segment.
+**Session log only.** Inspect `context-prune-diagnostic` entries for diagnostics. Neither the footer nor `/pruner status` displays diagnostic counters; `/pruner status` retains its settings, stats, and context metrics.
 
 ---
 

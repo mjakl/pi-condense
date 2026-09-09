@@ -78,15 +78,6 @@ describe("StatsAccumulator.getSessionDelta", () => {
   });
 });
 
-describe("StatsAccumulator.getLiveReclaim / setLiveReclaim", () => {
-  it("(c) undefined initially; round-trips after set", () => {
-    const acc = new StatsAccumulator();
-    expect(acc.getLiveReclaim()).toBeUndefined();
-    acc.setLiveReclaim(1000, 200);
-    expect(acc.getLiveReclaim()).toEqual({ beforeChars: 1000, afterChars: 200 });
-  });
-});
-
 describe("emitExternalCost", () => {
   it("(d) emits exactly one event on EXTERNAL_COST_CHANNEL with session delta", () => {
     const acc = new StatsAccumulator();

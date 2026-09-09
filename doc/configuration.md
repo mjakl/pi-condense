@@ -91,7 +91,7 @@ Inspired by DCP's `maxContextLimit` nudging; simplified to a single threshold th
 
 ### Frontier-gap flush trigger
 
-`frontierGapThresholdTokens` (default `null`) is a third, opt-in flush trigger, ORed with `autoBudgetThreshold` and `budgetTurnDelta` (precedence: budget, then delta, then frontier-gap - the first one that fires wins for that turn). Where the other two triggers measure a *fraction* of the context window, this one measures an absolute token count: the un-pruned tail past the persisted prune frontier (`frontierGapTokens`, the same metric shown in `/pruner status` and the footer suffix). It exists for windows large enough that a window-fraction trigger never fires in practice - a huge advertised window makes `autoBudgetThreshold`/`budgetTurnDelta` unreachable long before the un-pruned tail becomes a real problem; this trigger is the absolute-token complement that fires independent of window size.
+`frontierGapThresholdTokens` (default `null`) is a third, opt-in flush trigger, ORed with `autoBudgetThreshold` and `budgetTurnDelta` (precedence: budget, then delta, then frontier-gap - the first one that fires wins for that turn). Where the other two triggers measure a *fraction* of the context window, this one measures an absolute token count: the un-pruned tail past the persisted prune frontier (`frontierGapTokens`, the same metric shown in `/pruner status`). It exists for windows large enough that a window-fraction trigger never fires in practice - a huge advertised window makes `autoBudgetThreshold`/`budgetTurnDelta` unreachable long before the un-pruned tail becomes a real problem; this trigger is the absolute-token complement that fires independent of window size.
 
 Set it well above normal per-flush accumulation (roughly 5k-15k tokens between flushes in a typical session) so it only fires in pathological auto-continued stretches where flushes stop happening for a long run - **`80000` is a reasonable starting value**. The trigger is self-throttling: the frontier advances on every processed flush outcome (including this one), but an attempt that finds zero capturable batches does not advance it and rewrites nothing, so it cannot churn the cache; on a mid-flush summarizer failure the frontier advances only to the persisted prefix, so the next gated turn may re-fire while consuming the remaining backlog - the bound is amortized (one extra prefix rewrite per threshold-worth of new tail growth), not per-turn-exact under failures.
 
@@ -172,22 +172,9 @@ Short refs (`tN`) always resolve 1:1 and are the primary, recommended path; a re
 
 ## Footer status widget
 
-A footer widget shows the current state, controlled by `showPruneStatusLine`:
+The footer shows literal `prune: on` when both `enabled` and `showPruneStatusLine` are true; otherwise it shows nothing. No divider, activity, counters, reclaim ratio, or context metrics are appended.
 
-Every rendered state is prefixed with a single leading `|` divider so the segment stays visually isolated in the shared footer regardless of where other extensions' status segments land (load-order independent); there is no trailing divider - the footer's own space-join between segments already provides one.
-
-- `| prune: OFF` - disabled
-- `| prune: ON` - enabled, no flushes yet
-- `| prune: ON . 92.0k->14.0k (-85%)` - enabled; live reclaim ratio (estimated tokens before->after, percent reduction). Updates on every `pruneMessages` call.
-- `| prune: 3 pending` - batches queued, waiting for the trigger
-- `| prune: summarizing...` - flush in progress
-- `| prune: ON . 92.0k->14.0k (-85%) . diag u1/o2` - same as above, plus a self-hiding diagnostic segment (`u`/`m`/`o` counters, each hidden at zero). See [PRUNING.md § Diagnostics](../PRUNING.md#diagnostics).
-- `| prune: ON . think 3.2k . gap 5.1k . chain 41%` - a context-pressure suffix, shown only when `frontierGapTokens > 0` (nothing to append when the frontier is fully caught up). All three are chars/4 token estimates, same convention as the reclaim ratio above:
-  - `think` - `openCycleThinkingTokens`: thinking-block tokens trapped in the still-open cycle (after the last text-only assistant reply), not yet eligible for pruning.
-  - `gap` - `frontierGapTokens`: summarization-eligible tool-result tokens sitting past the persisted prune frontier.
-  - `chain` - `largestChainSharePct`: the largest single chain's (or the open segment's) share of total branch chars.
-  See [PRUNING.md § Single-chain sessions](../PRUNING.md#single-chain-sessions) for exact definitions.
-- `| prune: recovered pending (reload)` - shown at `agent_end` when a session reload found recoverable unflushed work but no new turn re-queued it. See [PRUNING.md § Reload rearm](../PRUNING.md#reload-rearm) for what "recovered" means and when it actually flushes.
+Diagnostics remain in `context-prune-diagnostic` session entries only, not in the footer or model context. See [PRUNING.md § Diagnostics](../PRUNING.md#diagnostics).
 
 Setting `showPruneStatusLine: false` hides the widget and silences the queued-turn notice; pruning still runs.
 
@@ -205,5 +192,5 @@ frontier gap: 5.1k tokens
 rearmed:      yes
 ```
 
-- `thinking` / `chain share` / `frontier gap` are the same `openCycleThinkingTokens` / `largestChainSharePct` / `frontierGapTokens` metrics shown in the footer suffix above, formatted as full labels here instead of a compact suffix.
+- `thinking` / `chain share` / `frontier gap` report `openCycleThinkingTokens` / `largestChainSharePct` / `frontierGapTokens` here, not in the footer. See [PRUNING.md § Single-chain sessions](../PRUNING.md#single-chain-sessions) for exact definitions.
 - `rearmed: yes` appears only while the reload-rearm flag is armed (cleared the moment any flush attempt runs). See [PRUNING.md § Reload rearm](../PRUNING.md#reload-rearm).
