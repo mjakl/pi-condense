@@ -287,6 +287,48 @@ function bootExtension(
 }
 
 describe("errors-only notifications", () => {
+  for (const trigger of ["budget", "message-end", "manual"]) {
+    for (const failure of ["disk full", "This extension ctx is stale after session replacement or reload."]) {
+      it(`${trigger} frontier failure reports once unless the context is stale`, async () => {
+        let writes = 0;
+        const failFrontier = (push: (type: string, data?: unknown) => void) => (type: string, data?: unknown) => {
+          if (type === "context-prune-frontier") { writes++; throw new Error(failure); }
+          push(type, data);
+          return "id";
+        };
+        const h = await boot({ sessionAppendCustomEntry: failFrontier, piAppendEntry: failFrontier });
+        await h.handlers.get("session_start")!({}, h.ctx);
+        if (trigger === "manual") await h.commands.get("pruner")!("now", h.ctx);
+        else if (trigger === "budget") {
+          await h.handlers.get("turn_end")!({ message: h.branch[1].message, toolResults: [h.branch[2].message] }, h.ctx);
+        } else {
+          await h.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, h.ctx);
+        }
+        expect(writes).toBe(1);
+        expect(h.notifications).toEqual(failure === "disk full" ? ["pruner: summarization failed: disk full"] : []);
+        expect(h.appended.filter(e => e.type === "context-prune-flush-metrics").at(-1)?.data).toMatchObject({ outcome: "error" });
+      });
+    }
+  }
+
+  it("reports a session-appender access failure once", async () => {
+    const h = await boot();
+    await h.handlers.get("session_start")!({}, h.ctx);
+    Object.defineProperty(h.ctx, "sessionManager", { get() { throw new Error("session unavailable"); } });
+    await h.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, h.ctx);
+    expect(h.notifications).toEqual(["pruner: summarization failed: session unavailable"]);
+  });
+
+  it("does not duplicate an already reported manual archive failure", async () => {
+    const h = await boot({ piAppendEntry: (push) => (type, data) => {
+      if (type === "context-prune-index") throw new Error("archive failed");
+      push(type, data);
+    } });
+    await h.handlers.get("session_start")!({}, h.ctx);
+    await h.commands.get("pruner")!("now", h.ctx);
+    expect(h.notifications).toEqual(["pruner: summarization failed: archive failed"]);
+  });
+
   it("changes settings silently and retains explicit status output", async () => {
     const h = await boot({ branch: [] });
     for (const args of ["off", "on", "model default", "thinking off", "batching turn", "prune-on on-demand", "protected-tools read", "protected-paths *.md", "min-batch-chars 100", "recovery-grace 0", "dedup off"]) {

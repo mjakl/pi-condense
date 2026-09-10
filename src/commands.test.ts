@@ -85,7 +85,21 @@ describe("notification policy", () => {
     });
   }
 
-  for (const reason of ["failed", "summarizer-failed", "skipped-oversized"]) {
+  for (const reason of ["failed", "summarizer-failed"]) {
+    it(`does not duplicate ${reason} notifications owned by flushPending`, async () => {
+      const harness = setupPrunerCommand({
+        capturePendingBatches: () => [{ toolCalls: [] }],
+        flushPending: async () => {
+          harness.notifications.push({ message: "original failure", type: "error" });
+          return { ok: false, reason };
+        },
+      });
+      await harness.run("now");
+      expect(harness.notifications).toEqual([{ message: "original failure", type: "error" }]);
+    });
+  }
+
+  for (const reason of ["skipped-oversized"]) {
     it(`retains manual ${reason} warnings`, async () => {
       const harness = setupPrunerCommand({
         capturePendingBatches: () => [{ toolCalls: [] }],

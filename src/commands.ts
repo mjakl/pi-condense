@@ -999,13 +999,8 @@ export function registerCommands(
 
           clearWidget();
 
-          if (!result.ok) {
-            if (!["empty", "already-flushing", "aborted", "stale-context"].includes(result.reason)) {
-              const suffix = result.error ? ` (${result.error})` : "";
-              ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, "warning");
-            }
-            break;
-          }
+          // flushPending owns failure notifications for both automatic and manual calls.
+          if (!result.ok) break;
 
           if (result.reason === "skipped-oversized") {
             ctx.ui.notify(

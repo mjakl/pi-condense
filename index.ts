@@ -291,6 +291,9 @@ export default function (pi: ExtensionAPI) {
           appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
         } catch (err) {
           outcome = "error";
+          if (!isStaleContextError(err)) {
+            safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
+          }
           return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
         }
       }
@@ -644,6 +647,9 @@ export default function (pi: ExtensionAPI) {
         // reflect that in processedBatches rather than reporting 0.
         processedCount = processedBatches.length;
         outcome = "error";
+        if (!isStaleContextError(err)) {
+          safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
+        }
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
