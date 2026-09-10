@@ -1,5 +1,67 @@
 import { expect, it } from "bun:test";
 
+it("forwards distinct identities through overlapping real Responses requests (offline)", async () => {
+  const child = Bun.spawn([process.execPath, "--eval", `
+    import { summarizeBatches } from "./src/summarizer.ts";
+    import { DEFAULT_CONFIG } from "./src/types.ts";
+    import { getModel } from "@earendil-works/pi-ai/compat";
+    const requests = [];
+    let release;
+    const bothStarted = new Promise(resolve => { release = resolve; });
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({ url: String(url), body, headers: Object.fromEntries(new Headers(init.headers)) });
+      if (requests.length === 2) release();
+      await bothStarted;
+      const item = { type: "message", id: "msg_offline", role: "assistant", status: "completed",
+        content: [{ type: "output_text", text: "offline summary", annotations: [] }] };
+      const events = [
+        { type: "response.created", response: { id: "resp_offline" } },
+        { type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+        { type: "response.content_part.added", output_index: 0, content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] } },
+        { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "offline summary" },
+        { type: "response.output_item.done", output_index: 0, item },
+        { type: "response.completed", response: { id: "resp_offline", status: "completed", output: [item],
+          usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } } },
+      ];
+      return new Response(events.map(e => "event: " + e.type + "\\ndata: " + JSON.stringify(e) + "\\n\\n").join(""), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    const model = { ...getModel("openai", "gpt-4.1-mini"), baseUrl: "https://offline.invalid/v1" };
+    const ctx = { model, modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "offline-test-key", headers: {} }),
+      getProviderAuth: async () => undefined,
+    }, ui: { notify: message => { throw new Error(message); } } };
+    const batch = { turnIndex: 1, timestamp: 1, assistantText: "", toolCalls: [
+      { toolCallId: "t1", toolName: "read", args: {}, resultText: "synthetic source", isError: false },
+    ] };
+    const results = await summarizeBatches([batch, batch], {
+      ...DEFAULT_CONFIG, summarizerModel: "default", summarizerThinking: "off",
+    }, ctx);
+    console.log(JSON.stringify({ requests, results }));
+  `], { cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, PI_CACHE_RETENTION: "short" }, timeout: 4000 });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+  ]);
+  expect(stderr).toBe("");
+  expect(exitCode).toBe(0);
+  const { requests, results } = JSON.parse(stdout);
+  expect(requests).toHaveLength(2);
+  expect(results.map((r: any) => r.result?.summaryText)).toEqual(["offline summary", "offline summary"]);
+  const ids = requests.map((request: any) => {
+    const id = request.body.prompt_cache_key;
+    expect(id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(request.headers.session_id).toBe(id);
+    expect(request.headers["x-client-request-id"]).toBe(id);
+    expect(request.url).toBe("https://offline.invalid/v1/responses");
+    return id;
+  });
+  expect(new Set(ids).size).toBe(2);
+});
+
 it("sends high thinking through the real Anthropic adapter with resolved auth (offline)", async () => {
   // A fresh process keeps other tests' pi-ai module mocks out of this request-level proof.
   const child = Bun.spawn([process.execPath, "--eval", `

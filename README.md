@@ -120,7 +120,7 @@ These are most informative for long single-chain sessions where Phase 3 (chain c
 ## Limitations
 
 - Pruning only applies to batches captured *while enabled*. Enabling mid-session does not retroactively summarize earlier turns.
-- Summarizer calls run inside the existing flush boundary, with at most **2 automatic batch jobs** in flight per extension session by default. Retry waits and fallback keep the same slot; summaries still publish after all jobs settle, in input order. Larger queues add latency. Set file-only `contextPrune.summarizerConcurrency` to an integer >= 1 to adjust it; manual progress-driven flushes stay serial. See [Summary concurrency](doc/configuration.md#summary-concurrency).
+- Summarizer calls run inside the existing flush boundary, with at most **2 automatic batch jobs** in flight per extension session by default. Retry waits and fallback keep the same slot; summaries still publish after all jobs settle, in input order. Larger queues add latency. Set file-only `contextPrune.summarizerConcurrency` to an integer >= 1 to adjust it; manual progress-driven flushes stay serial. Each batch or range-fusion job passes a fresh provider `sessionId`, stable through its retries and fallback, separate from chat and other jobs. Provider support determines its routing/cache effect. See [Summary concurrency](doc/configuration.md#summary-concurrency).
 - Content-hash dedup only matches against records already in the indexer (cross-flush); two identical outputs within the *same* flush both go through the summarizer.
 - The tree browser (`/pruner tree`) does not inline original tool outputs - use `context_tree_query` for that.
 
