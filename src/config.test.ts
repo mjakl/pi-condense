@@ -35,6 +35,21 @@ async function writeContextPrune(overrides: Record<string, unknown>): Promise<vo
   await writeFile(settingsPath(), JSON.stringify({ contextPrune: overrides }));
 }
 
+describe("keepRecentUserTurns", () => {
+  for (const value of [0, 1, 4, 100]) {
+    it(`accepts ${value}`, async () => {
+      await writeContextPrune({ keepRecentUserTurns: value });
+      expect((await loadConfig()).keepRecentUserTurns).toBe(value);
+    });
+  }
+  for (const value of [-1, 1.5, "2", null, true, Infinity, NaN, undefined]) {
+    it(`defaults invalid ${String(value)} to zero`, async () => {
+      await writeContextPrune({ keepRecentUserTurns: value });
+      expect((await loadConfig()).keepRecentUserTurns).toBe(0);
+    });
+  }
+});
+
 describe("loadConfig nested defaults", () => {
   for (const key of ["chainCompression", "purgeErrors"] as const) {
     for (const [field, value] of Object.entries(DEFAULT_CONFIG[key])) {

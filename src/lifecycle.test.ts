@@ -1,6 +1,6 @@
 import { expect, it } from "bun:test";
 
-for (const mode of ["final-response", "budget"]) {
+for (const mode of ["final-response", "budget", "recent-final", "recent-budget"]) {
   it(`delivers ${mode} summaries once across live runs and reload (offline Pi SDK)`, async () => {
     // Isolate real Pi/Anthropic dispatch from the unit suite's module mocks.
     const child = Bun.spawn([process.execPath, "src/lifecycle-fixture.ts", mode], {
@@ -12,6 +12,8 @@ for (const mode of ["final-response", "budget"]) {
     ]);
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    expect(JSON.parse(stdout)).toEqual({ budget: mode === "budget", calls: 9, summaries: mode === "budget" ? 6 : 3, reload: true });
+    expect(JSON.parse(stdout)).toEqual(mode.startsWith("recent-")
+      ? { recent: true, budget: mode === "recent-budget", calls: 9, summaries: 1, reload: true }
+      : { budget: mode === "budget", calls: 9, summaries: mode === "budget" ? 6 : 3, reload: true });
   });
 }

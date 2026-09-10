@@ -1,3 +1,4 @@
+import { recentUserTurnsBoundary } from "./recent-user-turns.js";
 import { CUSTOM_TYPE_CHAIN } from "./types.js";
 import type { ChainRange, ChainCompressionEntry, ToolCallRecord } from "./types.js";
 import type { ToolCallIndexer } from "./indexer.js";
@@ -82,6 +83,7 @@ export interface ChainCompressorIndexerDeps {
 }
 
 export interface CompressEligibleDeps {
+  keepRecentUserTurns?: number;
   indexer: ChainCompressorIndexerDeps;
   blockRefs: BlockRefIssuer;
   /** pi.appendEntry binding — routes to session or runtime depending on caller context */
@@ -175,6 +177,7 @@ export async function compressEligible(
     }
   }
 
+  const boundary = recentUserTurnsBoundary(deps.messages, deps.keepRecentUserTurns);
   const eligible = selectEligible(chains, rollingWindow, alreadyCompressedTimestamps, inGraceToolCallIds);
 
   const compressedEntries: ChainCompressionEntry[] = [];
@@ -189,6 +192,7 @@ export async function compressEligible(
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;
     }
+    if (range.endIndex >= boundary) continue;
     if (hasNonTextOutput(deps.messages, range)) {
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;

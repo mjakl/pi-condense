@@ -24,6 +24,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
     "quietOversizedSkips": false,
     "minBatchChars": 1000,
     "recoveryGraceTurns": 3,
+    "keepRecentUserTurns": 0,
     "protectedTools": [],
     "protectedPaths": ["**/skills/**/*.md", "**/gauntlet-overrides.md"],
     "dedupByContentHash": true,
@@ -55,6 +56,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | `batchingMode` | `turn` / `agent-message` | `turn` | How coarse each summary is (independent of `pruneOn`) |
 | `quietOversizedSkips` | `true` / `false` | `false` | Silences trivial/dedup info notifications; rejected summaries always warn |
 | `minBatchChars` | non-negative integer, `0` disables | `1000` | Pre-flush guard - batches smaller than this skip the LLM entirely |
+| `keepRecentUserTurns` | nonnegative integer | `0` | File-only. Preserve the latest N user interactions, including the current one, from all condense rewrites. `0` disables; invalid values reset to `0`. See [Recent user interactions](#recent-user-interactions). |
 | `recoveryGraceTurns` | non-negative integer (user-turn-groups), `0` disables | `3` | Defer structural compression of recovery chains for this many user-turn-groups. Recovery text stays verbatim permanently, including after relocation; `0` disables only the deferral. See [PRUNING.md § What Pruning Does](../PRUNING.md#what-pruning-does) |
 | `summarizerIdleTimeoutMs` | non-negative integer (ms), `0` disables | `20000` | Abort a summarizer stream call after this much silence (no stream event). Resets on every event, so it never false-aborts a flowing generation; catches a stalled connection fast. A timeout feeds the same outage-fallback retry as a provider error. `0` = no idle bound. |
 | `summarizerMaxTimeoutMs` | non-negative integer (ms), `0` disables | `180000` | Hard ceiling on total duration of a single summarizer stream call. Backstop for a stream that dribbles forever without going idle. Generous by design (clears the observed p99). `0` = no ceiling. |
@@ -78,9 +80,28 @@ See [PRUNING.md § Chain Compression](../PRUNING.md#chain-compression) and [PRUN
 
 The three pre-flush features (`minBatchChars`, `protectedTools`, `dedupByContentHash`) are explained in [PRUNING.md § Pre-flush Pipeline & Safeguards](../PRUNING.md#pre-flush-pipeline--safeguards). They run BEFORE any summarizer LLM call and can each drop a batch outright while still advancing the prune frontier.
 
+### Recent user interactions
+
+Set `contextPrune.keepRecentUserTurns` to a nonnegative integer. An interaction
+starts at a user message and runs until immediately before the next user message;
+assistant/tool turns and custom extension messages do not start new interactions.
+`1` protects the current interaction; `3` protects it and the previous two.
+If fewer than N user messages exist, the whole available context is protected.
+
+Protected interactions are excluded from summary capture, content dedup, spill
+backfill, protected-read supersession, failed-argument cleanup, chain compression,
+and orphan cleanup. Existing summaries, spill stubs, and chain entries cannot
+rewrite this suffix at render time. Older work becomes eligible on the next
+branch rescan without advancing the frontier over protected work.
+
+Pressure triggers and `/pruner compact` do not override this boundary. Other
+windows and cooldowns still apply within the eligible prefix. This setting does
+not reconstruct content already lost and does not control Pi native compaction.
+A large protected interaction can therefore fill the context window.
+
 ### Token-budget auto-flush
 
-When `autoBudgetThreshold` is set to a value in `(0, 1]`, the extension checks context usage at the end of every tool-using turn. If `tokens` reaches `min(300_000, threshold * contextWindow)`, ALL pending batches are flushed immediately - regardless of `pruneOn` mode. This is an **additional** trigger layered on top of `pruneOn`, not a replacement.
+When `autoBudgetThreshold` is set to a value in `(0, 1]`, the extension checks context usage at the end of every tool-using turn. If `tokens` reaches `min(300_000, threshold * contextWindow)`, all eligible pending batches are flushed immediately - regardless of `pruneOn` mode. This is an **additional** trigger layered on top of `pruneOn`, not a replacement.
 
 - `0.8` means 80% of the context window - it is a **fraction**, not a percentage. `0.8 != 80`.
 - **The trigger point is capped at 300,000 tokens** (`MAX_BUDGET_WINDOW` in `src/budget.ts`). Without it, an advertised 1M window makes every setting unreachable: `0.9` would mean 900k tokens, so a session ends before pruning ever fires. The ceiling never binds on a model advertising 300k or less - a 256k window at `0.9` still fires at 230.4k - so only huge-window models change behavior, and they flush earlier.

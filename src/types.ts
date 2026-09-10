@@ -312,6 +312,8 @@ export interface ContextPruneConfig {
    * 0 disables only the structural deferral.
    */
   recoveryGraceTurns: number;
+  /** Preserve the latest N user interactions from all condense rewrites. 0 disables. */
+  keepRecentUserTurns: number;
   /**
    * Idle (inactivity) timeout for a single summarizer stream call, in ms.
    * Reset on every received stream event; armed before the first event so it
@@ -557,6 +559,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   quietOversizedSkips: false,
   minBatchChars: 1000,
   recoveryGraceTurns: 3,
+  keepRecentUserTurns: 0,
   summarizerIdleTimeoutMs: 20000,
   summarizerMaxTimeoutMs: 180000,
   protectedTools: [],

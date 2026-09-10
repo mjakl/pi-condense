@@ -9,6 +9,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
+- Add file-only `contextPrune.keepRecentUserTurns` (nonnegative integer, default `0`). Preserve the latest N user interactions, including the current one, from summary capture, dedup, spill backfill, supersession, failed-argument cleanup, chain compression, and orphan cleanup. Historical summary/spill/chain metadata cannot rewrite the protected suffix. Pressure and `/pruner compact` do not override it. Older interactions become eligible through branch rescans, including after reload. Does not undo historical loss or control Pi native compaction.
+
 - Give every batch and range-summary job a fresh UUID through pi-ai's supported `sessionId` option, separate from normal chat and other summaries across Pi sessions. Keep it stable through the job's primary retries and fallback; later invocations get new identities. Automatic, manual, and merged-batch paths share this behavior. Provider routing/cache support determines the wire effect. Default concurrency remains 2; retry policy, publication order, and archival are unchanged.
 
 - Limit automatic batch summarization to 2 concurrent jobs per extension session by default. Configure file-only `contextPrune.summarizerConcurrency` (finite number >= 1, fractions floored; invalid values reset to 2). Jobs retain their slots through retry waits and fallback. Preserve ordered results, the all-results publication barrier, and serial manual progress. Cancellation stops queued dispatch; thrown errors wait for started work to settle before returning control to the flush. No global provider quota or background preparation.

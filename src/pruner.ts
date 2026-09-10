@@ -1,3 +1,4 @@
+import { recentUserTurnsBoundary } from "./recent-user-turns.js";
 import { createHash } from "node:crypto";
 import type { ToolCallIndexer } from "./indexer.js";
 import { QUERY_TOOL_NAME, type ChainCompressionConfig, type ErrorPurgeConfig } from "./types.js";
@@ -70,7 +71,19 @@ export function pruneMessages(
   _recoveryGraceTurns: number = 0,
   diagnostics?: DiagnosticSink,
   supersede?: { state: SupersedeState; isProtected: (toolName: string, args: unknown) => boolean },
+  keepRecentUserTurns = 0,
 ): { messages: any[]; pruned: boolean } {
+  const boundary = recentUserTurnsBoundary(messages, keepRecentUserTurns);
+  if (boundary < messages.length) {
+    if (boundary === 0) return { messages, pruned: false };
+    // Run every rewrite on the eligible prefix, including structural cleanup.
+    // The untouched suffix starts at a user barrier, so no tool pair crosses it.
+    const prefix = pruneMessages(messages.slice(0, boundary), indexer, chainCompression,
+      errorPurge, protection, _recoveryGraceTurns, diagnostics, supersede);
+    return prefix.pruned
+      ? { messages: [...prefix.messages, ...messages.slice(boundary)], pruned: true }
+      : { messages, pruned: false };
+  }
   // Phase 1: stub-replace summarized tool results
   let pruned = false;
   const next = messages.map((msg) => {
