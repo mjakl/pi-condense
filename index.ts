@@ -32,6 +32,7 @@ import type {
   ContextMetricsSnapshot,
   FlushMetricsEntry,
   FlushTrigger,
+  SummarizeResult,
 } from "./src/types.js";
 import {
   DEFAULT_CONFIG,
@@ -215,15 +216,15 @@ export default function (pi: ExtensionAPI) {
   // Summaries always use Pi's non-turn delivery for live state and persistence.
   // Range-summary fuser injected into compressEligible (B). Returns undefined
   // when fuseRangeSummary is off so the compressor keeps the per-batch concat.
-  // Each successful fusion folds its usage + bumps the rangesSummarized counter.
+  // Every completed fusion response folds its usage; success bumps rangesSummarized.
   const makeFuseRange = (ctx: any): ((text: string) => Promise<string | null>) | undefined => {
     if (!currentConfig.value.chainCompression.fuseRangeSummary) return undefined;
     return async (text: string) => {
-      const r = await summarizeRange(text, currentConfig.value, ctx, { controller: fallbackController });
-      if (r) {
-        statsAccum.add(r.usage);
-        statsAccum.addRangesSummarized(1);
-      }
+      const r = await summarizeRange(text, currentConfig.value, ctx, {
+        controller: fallbackController,
+        onUsage: (usage) => statsAccum.add(usage),
+      });
+      if (r) statsAccum.addRangesSummarized(1);
       return r?.summaryText ?? null;
     };
   };
@@ -402,6 +403,13 @@ export default function (pi: ExtensionAPI) {
       // "deduped" (pre-flush dedup ate every tool call in this batch).
       type ResultSlot = import("./src/types.js").SummarizeResult | null | "trivial" | "deduped";
       const results: ResultSlot[] = new Array(batches.length).fill(null);
+      // Every completed response is charged, whether usable, rejected later, or
+      // restored because ordered publication stopped before it.
+      let charged = false;
+      const onUsage = (usage: SummarizeResult["usage"]) => {
+        statsAccum.add(usage);
+        charged = true;
+      };
 
       if (options.onProgress) {
         for (let i = 0; i < batches.length; i++) {
@@ -419,6 +427,7 @@ export default function (pi: ExtensionAPI) {
           const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
             signal: options.signal,
             controller: fallbackController,
+            onUsage,
             onTextProgress: (receivedChars) => {
               reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
             },
@@ -443,20 +452,11 @@ export default function (pi: ExtensionAPI) {
             },
             signal: options.signal,
             controller: fallbackController,
+            onUsage,
           });
           for (let k = 0; k < nonTrivialIndices.length; k++) {
             results[nonTrivialIndices[k]] = ntResults[k];
           }
-        }
-      }
-
-      // Every completed call was charged, whether or not the ordered
-      // publication below reaches it; record usage before the loop can stop.
-      let charged = false;
-      for (const r of results) {
-        if (r !== null && typeof r === "object") {
-          statsAccum.add(r.usage);
-          charged = true;
         }
       }
 

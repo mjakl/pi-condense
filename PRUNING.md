@@ -17,7 +17,7 @@
 9. [Pre-flush Pipeline & Safeguards](#pre-flush-pipeline--safeguards)
    - [Stub-replace instead of delete](#stub-replace-instead-of-delete)
    - [Protected tools](#protected-tools)
-   - [Eager single-result spill](#eager-single-result-spill)
+   - [Archival spill compatibility](#archival-spill-compatibility)
    - [Trivial-batch skip (minBatchChars)](#trivial-batch-skip-minbatchchars)
    - [Content-hash dedup](#content-hash-dedup)
    - [Oversized summary rejection](#oversized-summary-rejection)
@@ -971,7 +971,7 @@ Chain compression does not delete data from the session JSONL. The original tool
 </compressed-chain>
 ```
 
-Chains containing protected non-text content (including images) remain uncompressed. This guard runs both before persisting a new chain compression and when rendering an existing compression entry. Text extraction must never discard a protected content block.
+Chains containing any non-text tool result (including images) remain uncompressed. This guard runs both before persisting a new chain compression and when rendering an existing compression entry, including entries persisted by older versions. Text extraction must never discard a protected content block.
 
 The protected text output is relocated (moved), not copied — the original `ToolResultMessage` is dropped with the rest of the middle turns. The text stays in LLM context because it is embedded in the surviving synthetic block. It is NOT registered in the tool-call index and is NOT recoverable via `context_tree_query`; it does not need to be, because it is present verbatim.
 

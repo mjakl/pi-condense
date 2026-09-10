@@ -4,7 +4,7 @@ import type { ToolCallIndexer } from "./indexer.js";
 import type { BlockRefIssuer } from "./block-refs.js";
 import type { DiagnosticSink } from "./diagnostics.js";
 import { bareToolCallId, occKey, parseOccKey, resultTimestampOf } from "./occurrence-key.js";
-import { hasUnsafeProtectedOutput, resolveRange } from "./chain-range-prune.js";
+import { hasNonTextOutput, resolveRange } from "./chain-range-prune.js";
 import { extractToolResultText } from "./batch-capture.js";
 
 /**
@@ -189,7 +189,7 @@ export async function compressEligible(
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;
     }
-    if (hasUnsafeProtectedOutput(deps.messages, range, chain.protectedToolCallIds)) {
+    if (hasNonTextOutput(deps.messages, range)) {
       skipped.push({ startUserTimestamp: chain.startUserTimestamp, reason: "no-summary" });
       continue;
     }

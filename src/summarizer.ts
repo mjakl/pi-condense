@@ -233,6 +233,8 @@ async function runOnce(
       if (timedOut) return { kind: "transient", message: timeoutMessage(), timedOut: true };
       return { kind: "transient", message: response.errorMessage ?? "Summarizer stopped with reason: error" };
     }
+    // Charged whether or not the text turns out usable.
+    options.onUsage?.(response.usage);
 
     const llmText = response.content
       .filter((c: any) => c.type === "text")
@@ -418,6 +420,7 @@ export async function summarizeBatches(
       await summarizeBatch(batches[0], config, ctx, {
         signal: options.signal,
         controller: options.controller,
+        onUsage: options.onUsage,
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
         },
@@ -431,6 +434,7 @@ export async function summarizeBatches(
       summarizeBatch(batch, config, ctx, {
         signal: options.signal,
         controller: options.controller,
+        onUsage: options.onUsage,
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
         },

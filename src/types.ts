@@ -873,12 +873,16 @@ export interface SummarizeBatchOptions {
    * (see src/summarizer-fallback.ts). Absent => today's single-attempt behavior.
    */
   controller?: FallbackController;
+  /** Fires once per completed provider response, usable or not; charged either way. */
+  onUsage?: (usage: SummarizeResult["usage"]) => void;
 }
 
 /** Options for summarizeBatches() when callers want live per-batch text progress. */
 export interface SummarizeBatchesOptions {
   /** Receives streamed summary text character counts for each batch. */
   onBatchTextProgress?: BatchTextProgressCallback;
+  /** Forwarded to every individual summarizeBatch() call. */
+  onUsage?: (usage: SummarizeResult["usage"]) => void;
   /**
    * Abort signal forwarded to every individual summarizeBatch() call.
    * When fired, all in-flight stream calls are cancelled.
