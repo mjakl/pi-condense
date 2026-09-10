@@ -775,9 +775,9 @@ export type PruneFrontierOutcome =
 /**
  * Snapshot of the last successfully completed prune attempt boundary.
  *
- * This advances both when pruning succeeds and when a summary is rejected for
- * being larger than the raw tool-result text it would replace. Operational
- * failures do not advance the frontier.
+ * This advances both when pruning succeeds and when a batch is rejected
+ * deterministically (over-budget input, unusable or larger-than-raw output).
+ * Transient and auth failures do not advance the frontier.
  */
 export interface PruneFrontier {
   /** Last tool call included in the completed prune attempt */
@@ -873,7 +873,7 @@ export interface SummarizeBatchOptions {
    * (see src/summarizer-fallback.ts). Absent => today's single-attempt behavior.
    */
   controller?: FallbackController;
-  /** Fires once per completed provider response, usable or not; charged either way. */
+  /** Fires once per completed provider response, before any classification: error stops and unusable text are billed too. */
   onUsage?: (usage: SummarizeResult["usage"]) => void;
 }
 
@@ -895,6 +895,18 @@ export interface SummarizeBatchesOptions {
    */
   controller?: FallbackController;
 }
+
+/**
+ * Classified outcome of one summarization call. `unusable` is deterministic
+ * for the same input (over-budget input, empty or length-truncated text), so
+ * callers retain originals and move on; `transient` and `auth` may succeed
+ * later and keep the batch pending.
+ */
+export type SummarizeOutcome =
+  | { kind: "ok"; result: SummarizeResult }
+  | { kind: "unusable"; message: string }
+  | { kind: "auth"; message: string }
+  | { kind: "transient"; message: string; timedOut?: boolean };
 
 /**
  * Result of a summarization call — the summary text plus LLM usage data.

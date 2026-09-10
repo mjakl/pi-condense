@@ -256,7 +256,8 @@ Trivial-batch skip (minBatchChars):
   not reconsidered next flush. Default is 1000. Set to 0 to disable.
   This runs BEFORE summarization, so it is cheaper than the post-LLM
   skipped-oversized path that also rejects summaries larger than the raw
-  input. Rejected summaries retain originals and leave the batch pending.
+  input. Rejected batches keep their originals verbatim and the frontier
+  advances past them, so they are not re-billed on later flushes.
 
 Protected tools:
   Some tools' outputs must stay verbatim across turns — typically planning tools
@@ -1053,7 +1054,7 @@ export function registerCommands(
 
           if (result.reason === "skipped-oversized") {
             ctx.ui.notify(
-              `pruner: skipped pruning ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} — summary was ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars; frontier advanced past this range`,
+              `pruner: retained ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} verbatim (${result.rawCharCount} raw chars) — no usable smaller summary; frontier advanced past this range`,
               "warning"
             );
             break;

@@ -58,11 +58,11 @@ it("sends high thinking through the real Anthropic adapter with resolved auth (o
   const { requests, results, raw, fullResult, tooLarge, notices } = JSON.parse(stdout);
   expect(requests).toHaveLength(7);
   expect(JSON.stringify(requests[6].body)).toContain(raw);
-  expect(fullResult.summaryText).toBe("offline summary");
-  expect(tooLarge).toBeNull();
-  expect(notices).toHaveLength(1);
-  expect(notices[0]).toContain("originals retained");
-  expect(results.every((result: any) => result?.summaryText === "offline summary")).toBe(true);
+  expect(fullResult.result.summaryText).toBe("offline summary");
+  expect(tooLarge.kind).toBe("unusable");
+  expect(tooLarge.message).toContain("context window");
+  expect(notices).toHaveLength(0);
+  expect(results.every((result: any) => result.kind === "ok" && result.result.summaryText === "offline summary")).toBe(true);
   expect(requests[0].body.thinking).toMatchObject({ type: "enabled", budget_tokens: 16384 });
   expect(requests[0].body.max_tokens).toBeGreaterThan(16384);
   expect(requests[3].body.thinking).toMatchObject({ type: "adaptive" });

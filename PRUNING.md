@@ -561,7 +561,7 @@ graph LR
 
 ## Pre-flush Pipeline & Safeguards
 
-`flushPending` filters protected and unsupported non-text results, deduplicates completed outputs, and skips trivial batches before calling the summarizer. Only completed summaries, deduplication and trivial skips advance the frontier. Failed, length-truncated, estimated-over-budget or oversized summaries retain originals and leave the rejected batch pending.
+`flushPending` filters protected and unsupported non-text results, deduplicates completed outputs, and skips trivial batches before calling the summarizer. Completed summaries, deduplication, trivial skips and deterministic rejections advance the frontier. Transient provider failures and auth failures stop ordered publication and leave that batch and everything after it pending. Estimated-over-budget input, empty or length-truncated output and larger-than-raw summaries are deterministic for the same input: the originals stay verbatim, the frontier passes the batch (`skipped-oversized`), it is never re-billed, and later batches in the same flush still publish.
 
 ```
 captured batches (from turn_end or session scan)
@@ -589,10 +589,10 @@ captured batches (from turn_end or session scan)
   ├─ 6. Summarizer LLM call           (parallel: one call per batch)
   │     resolveModel + summarizeBatch / summarizeBatches
   │
-  └─ 7. Oversized post-check          (decorated summary > raw? retain; no frontier advance)
+  └─ 7. Oversized post-check          (decorated summary > raw? retain verbatim; frontier advances)
 ```
 
-New frontier outcomes are `summarized`, `skipped-deduped`, or `skipped-trivial`. Historical `skipped-oversized` entries remain readable. The summarizer receives all captured text. Pi's context-token estimate rejects inputs already at or above the selected model's `contextWindow`; Pi clamps the output budget, and provider rejection or length-limited output also fails open. The estimate is not exact tokenization.
+Frontier outcomes are `summarized`, `skipped-oversized` (a deterministic rejection: over-budget input, empty or length-truncated output, or a summary larger than raw), `skipped-deduped`, or `skipped-trivial`. The summarizer receives all captured text. Pi's context-token estimate rejects inputs already at or above the selected model's `contextWindow` before any call; Pi clamps the output budget, and length-limited output is rejected after the call. The estimate is not exact tokenization.
 
 ### Stub-replace instead of delete
 
@@ -671,13 +671,13 @@ Edit with `/pruner dedup on|off|status` or the settings overlay.
 
 ### Oversized summary rejection
 
-Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context, no summary is injected, the batch stays pending, and the frontier does not advance. The call's usage is still recorded in `context-prune-stats` and `cost:external`, and a warning is always shown; `quietOversizedSkips` silences only trivial/dedup info notifications. After rejection the batch is handled like a failed or length-truncated summary (see [Pre-flush Pipeline & Safeguards](#pre-flush-pipeline--safeguards)).
+Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context verbatim, no summary is injected, no index entry is written, and the frontier advances past the batch (`skipped-oversized`). The call's usage is still recorded in `context-prune-stats` and `cost:external`, and a warning is always shown; `quietOversizedSkips` silences only trivial/dedup info notifications. Over-budget input and empty or length-truncated output take the same path: the outcome is deterministic for the same input, so re-sending it would only re-bill the batch and block every batch behind it. A rejected batch is not re-attempted; nothing downstream can stub or chain-drop it because it has no summary coverage.
 
-This is rare in practice once `minBatchChars` is on, because the cases where summarization makes things bigger are exactly the cases the trivial-batch skip already catches earlier. A batch rejected again on the next flush is charged again; there is no rejection backoff.
+This is rare in practice once `minBatchChars` is on, because the cases where summarization makes things bigger are exactly the cases the trivial-batch skip already catches earlier.
 
 ### Frontier persistence
 
-The last completed prune boundary is persisted as `context-prune-frontier` so `flushPending` knows where the previous flush left off, even if that flush only skipped trivial or deduplicated batches. Rejected summaries leave the frontier in place, so their batches are re-attempted on the next flush instead of being lost.
+The last completed prune boundary is persisted as `context-prune-frontier` so `flushPending` knows where the previous flush left off, even if that flush only skipped or retained batches. Transient provider failures and auth failures leave the frontier in place, so those batches are re-attempted on the next flush instead of being lost. Every charged summarizer response updates `context-prune-stats` once per flush attempt, written from the attempt's single exit point whatever the outcome.
 
 ### Other UI / observability features
 

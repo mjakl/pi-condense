@@ -9,7 +9,7 @@ import type {
   SummarizerThinking,
   SummarizeBatchOptions,
   SummarizeBatchesOptions,
-  SummarizeResult,
+  SummarizeOutcome,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
 import { FallbackController, type FallbackTransition } from "./summarizer-fallback.js";
@@ -85,12 +85,6 @@ export function isUsableSummary(llmText: string, stopReason: string): boolean {
   return llmText.trim().length > 0 && stopReason !== "length";
 }
 
-type RunOutcome =
-  | { kind: "ok"; result: SummarizeResult }
-  | { kind: "auth"; message: string }
-  | { kind: "unusable" }
-  | { kind: "transient"; message: string; timedOut?: boolean };
-
 /** Human label for a model in notify text: prefer name, fall back to provider/id. */
 function modelLabel(model: any): string {
   if (!model) return "unknown model";
@@ -109,9 +103,11 @@ function combineSignals(...signals: (AbortSignal | undefined)[]): AbortSignal | 
  * One summarization attempt against a specific model. Returns a classified
  * outcome instead of throwing (except aborts, which propagate so flushPending
  * can restore state). Auth failure is detected pre-stream and never reaches
- * the fallback path. `unusable` = empty or length-truncated. Everything else
- * that reaches the catch is `transient` (the outage bucket) — pi-ai surfaces
- * no structured status code on the throw, so classification is coarse by design.
+ * the fallback path. `unusable` = over-budget input, empty or length-truncated
+ * text. Everything else that reaches the catch is `transient` (the outage
+ * bucket) — pi-ai surfaces no structured status code on the throw, so
+ * classification is coarse by design. Never touches the UI: a notify failure
+ * inside this try would be misread as a provider outage and retried.
  */
 async function runOnce(
   model: any,
@@ -119,7 +115,7 @@ async function runOnce(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions
-): Promise<RunOutcome> {
+): Promise<SummarizeOutcome> {
   options.signal?.throwIfAborted();
   const context = {
     messages: [{ role: "user" as const, content: [{ type: "text" as const, text: userMessage }], timestamp: Date.now() }],
@@ -127,8 +123,7 @@ async function runOnce(
   // Pi estimates tokens and clamps the output budget itself. Do not truncate
   // input to make it fit; provider rejection or a length stop also retains raw.
   if (model?.contextWindow > 0 && estimateTokens(context.messages[0]) >= model.contextWindow) {
-    ctx.ui.notify(`pruner: input exceeds estimated context window of ${modelLabel(model)}; originals retained`, "warning");
-    return { kind: "unusable" };
+    return { kind: "unusable", message: `input exceeds estimated context window of ${modelLabel(model)}` };
   }
   const idleMs = config.summarizerIdleTimeoutMs;
   const maxMs = config.summarizerMaxTimeoutMs;
@@ -222,6 +217,9 @@ async function runOnce(
     if (options.signal?.aborted) throw new Error("summarize: aborted during stream");
 
     const response = await responseStream.result();
+    // Charged once per completed response, before any classification: error
+    // stops (refusal, mid-stream failure) and unusable text are billed too.
+    options.onUsage?.(response.usage);
     reportTextProgress(response);
     // stopReason "aborted" means the provider cut the stream short (e.g. signal
     // fired just before the final chunk). Treat identically to the signal check
@@ -233,8 +231,6 @@ async function runOnce(
       if (timedOut) return { kind: "transient", message: timeoutMessage(), timedOut: true };
       return { kind: "transient", message: response.errorMessage ?? "Summarizer stopped with reason: error" };
     }
-    // Charged whether or not the text turns out usable.
-    options.onUsage?.(response.usage);
 
     const llmText = response.content
       .filter((c: any) => c.type === "text")
@@ -242,8 +238,7 @@ async function runOnce(
       .join("\n");
 
     if (!isUsableSummary(llmText, response.stopReason)) {
-      ctx.ui.notify("pruner: summary was empty or length-truncated; originals retained", "warning");
-      return { kind: "unusable" };
+      return { kind: "unusable", message: "summary was empty or length-truncated" };
     }
 
     return { kind: "ok", result: { summaryText: llmText, usage: response.usage } };
@@ -262,9 +257,12 @@ async function runOnce(
 /**
  * Shared LLM-call machinery for both per-batch and range summarization.
  * `userMessage` already embeds the relevant system prompt as leading text
- * (the summarizer is a single-user-message call). Returns the formatted text
- * + usage, or null on failure. Abort errors are re-thrown so flushPending can
- * detect options.signal.aborted and restore state without a UI error.
+ * (the summarizer is a single-user-message call). Returns the classified
+ * outcome; transient and auth failures are notified here, outside runOnce's
+ * provider try, so a stale UI context surfaces as a thrown error at the
+ * caller's stale-context boundary rather than as a retryable outage.
+ * Abort errors are re-thrown so flushPending can detect
+ * options.signal.aborted and restore state without a UI error.
  *
  * When options.controller is set AND a distinct fallback model exists, a
  * initial transient failures get three primary retries, then one session-model
@@ -276,7 +274,7 @@ async function runSummarization(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions
-): Promise<SummarizeResult | null> {
+): Promise<SummarizeOutcome> {
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarize: aborted before start");
 
@@ -295,16 +293,8 @@ async function runSummarization(
   // No controller or no distinct fallback: single attempt, legacy behavior.
   if (!controller || !FallbackController.hasDistinctFallback(primary, sessionModel)) {
     const r = await runOnce(primary, userMessage, config, ctx, options);
-    switch (r.kind) {
-      case "ok":
-        return r.result;
-      case "auth":
-      case "transient":
-        notifyFailure(r);
-        return null;
-      case "unusable":
-        return null;
-    }
+    if (r.kind === "auth" || r.kind === "transient") notifyFailure(r);
+    return r;
   }
 
   const emit = (t: FallbackTransition) => {
@@ -335,41 +325,40 @@ async function runSummarization(
     case "ok":
       if (decision.target === "primary") emit(controller.onPrimarySuccess(decision.wasProbe));
       else emit(controller.onFallbackSuccess());
-      return r.result;
+      return r;
     case "auth":
       notifyFailure(r); // auth never trips the controller
-      return null;
+      return r;
     case "unusable":
-      return null; // probe unusable => stay (no state change)
+      return r; // deterministic for this input; probe unusable => stay (no state change)
     case "transient": {
       if (decision.target === "fallback") {
         controller.onFallbackOnlyFail();
         notifyFailure(r);
-        return null;
+        return r;
       }
       // Primary retries exhausted (or single probe failed): one fallback attempt.
       const r2 = await runOnce(sessionModel, userMessage, fallbackConfig, ctx, options);
       if (r2.kind === "ok") {
         emit(controller.onPrimaryFailFallbackOk(decision.wasProbe));
-        return r2.result; // suppress the legacy error notify — fallback rescued the call
+        return r2; // suppress the legacy error notify — fallback rescued the call
       }
       controller.onBothDown();
-      notifyFailure(r2.kind === "transient" || r2.kind === "auth" ? r2 : r);
-      return null;
+      // An unusable fallback text does not make the primary outage terminal.
+      const failure = r2.kind === "unusable" ? r : r2;
+      notifyFailure(failure);
+      return failure;
     }
   }
 }
 
-/**
- * Summarizes a captured batch. Returns formatted markdown string, or null on failure.
- * Shows user-visible errors via ctx.ui.notify.
- */
+/** Summarizes a captured batch into a classified outcome (see SummarizeOutcome). */
 export async function summarizeBatch(
   batch: CapturedBatch,
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions = {}
-): Promise<SummarizeResult | null> {
+): Promise<SummarizeOutcome> {
   const serialized = serializeBatchForSummarizer(batch);
   const userMessage =
     SYSTEM_PROMPT + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
@@ -380,15 +369,15 @@ export async function summarizeBatch(
  * Fuses a closed chain's already-computed per-batch summaries into one cohesive
  * range summary (recursive summarization). Input is the span's per-batch summary
  * text — small and already pruned — so this never re-sends raw tool output.
- * Returns the fused text + usage, or null on failure. Used by chain compression
- * to replace the concatenated per-batch body with a single coherent summary.
+ * Used by chain compression to replace the concatenated per-batch body with a
+ * single coherent summary.
  */
 export async function summarizeRange(
   perBatchSummaryText: string,
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions = {}
-): Promise<SummarizeResult | null> {
+): Promise<SummarizeOutcome> {
   const userMessage =
     RANGE_SYSTEM_PROMPT + "\n\n<sub-task-summaries>\n" + perBatchSummaryText + "\n</sub-task-summaries>";
   return runSummarization(userMessage, config, ctx, options);
@@ -397,9 +386,7 @@ export async function summarizeRange(
 /**
  * Summarizes multiple captured batches — one LLM call per batch, run in parallel.
  *
- * Returns an array of per-batch results. Each element is either a SummarizeResult
- * (success) or null (that specific batch's call failed). The array length always
- * equals batches.length so callers can zip by index.
+ * Returns one classified outcome per batch, index-aligned with `batches`.
  *
  * Rationale for parallel-per-batch instead of a single merged call:
  *   • Each batch becomes its own summary message (one per turn), so they can be
@@ -412,7 +399,7 @@ export async function summarizeBatches(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchesOptions = {}
-): Promise<Array<SummarizeResult | null>> {
+): Promise<SummarizeOutcome[]> {
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {

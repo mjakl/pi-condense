@@ -294,26 +294,32 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
 }
 
 describe("full-result quality", () => {
-  it("accounts for a rejected first summary without frontier completion, including reload", async () => {
+  it("a rejected summary retains originals, advances the frontier once, and is not re-billed after reload", async () => {
     const previous = streamImpl;
     const usage = { ...USAGE, cost: { ...USAGE.cost, total: 0.02 } };
-    streamImpl = () => ({ async *[Symbol.asyncIterator]() {}, async result() {
+    let calls = 0;
+    streamImpl = () => { calls++; return { async *[Symbol.asyncIterator]() {}, async result() {
       return { stopReason: "stop", content: [{ type: "text", text: "oversized summary" }], usage };
-    } });
+    } }; };
     try {
       const h = await boot({ branch: pendingBatchEntries("charged", "x", 100) });
       const costs: any[] = [];
       h.pi.events.emit = (channel: string, payload: any) => { if (channel === "cost:external") costs.push(payload); };
       const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
-      for (const expectedCost of [0.02, 0.04]) {
+      for (let round = 0; round < 2; round++) {
         await h.handlers.get("session_start")!({}, h.ctx);
         await h.handlers.get("message_end")!(finish, h.ctx);
+        expect(calls).toBe(1);
         const stats = h.appended.filter(e => e.type === "context-prune-stats");
-        expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(expectedCost);
-        expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.02, inputTokens: 1, outputTokens: 1 });
-        expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+        expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(0.02);
+        expect(costs).toHaveLength(1);
+        expect(costs[0]).toMatchObject({ source: "pi-condense", totalCost: 0.02, inputTokens: 1, outputTokens: 1 });
+        const frontiers = h.appended.filter(e => e.type === "context-prune-frontier");
+        expect(frontiers).toHaveLength(1);
+        expect((frontiers[0].data as any).outcome).toBe("skipped-oversized");
+        expect(h.appended.filter(e => ["context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+        expect(h.notifications.filter(n => n.includes("originals retained verbatim, frontier advanced"))).toHaveLength(1);
       }
-      expect(costs).toHaveLength(2);
     } finally { streamImpl = previous; }
   });
 
@@ -332,11 +338,15 @@ describe("full-result quality", () => {
       const stats = h.appended.filter(e => e.type === "context-prune-stats");
       expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(0.02);
       expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.02, inputTokens: 1, outputTokens: 1 });
-      expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      const frontiers = h.appended.filter(e => e.type === "context-prune-frontier");
+      expect(frontiers).toHaveLength(1);
+      expect((frontiers[0].data as any).outcome).toBe("skipped-oversized");
+      expect(h.appended.filter(e => ["context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      expect(h.notifications.at(-1)).toContain("summary was empty or length-truncated for turn");
     } finally { streamImpl = previous; }
   });
 
-  it("records usage for every completed parallel call when the first summary is rejected", async () => {
+  it("publishes later batches when an earlier summary is rejected and charges every completed call", async () => {
     const previous = streamImpl;
     const usage = { ...USAGE, cost: { ...USAGE.cost, total: 0.02 } };
     streamImpl = (_model, input) => ({ async *[Symbol.asyncIterator]() {}, async result() {
@@ -353,7 +363,14 @@ describe("full-result quality", () => {
       const stats = h.appended.filter(e => e.type === "context-prune-stats");
       expect((stats.at(-1)!.data as any).totalCost).toBeCloseTo(0.04);
       expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.04, inputTokens: 2, outputTokens: 2 });
-      expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      const frontiers = h.appended.filter(e => e.type === "context-prune-frontier");
+      expect(frontiers).toHaveLength(1);
+      expect((frontiers[0].data as any).outcome).toBe("summarized");
+      expect((frontiers[0].data as any).lastAttemptedToolCallId).toBe("second");
+      const summaries = h.appended.filter(e => e.type === "context-prune-summary");
+      expect(summaries).toHaveLength(1);
+      expect(JSON.stringify((summaries[0].data as any).details)).toContain("second");
+      expect(h.appended.filter(e => e.type === "context-prune-index")).toHaveLength(1);
     } finally { streamImpl = previous; }
   });
 
@@ -377,7 +394,10 @@ describe("full-result quality", () => {
       await h.handlers.get("turn_end")!({ message: branch[1].message, toolResults: [branch[2].message], turnIndex: 0 }, h.ctx);
       const finish = { message: branch[3].message };
       await h.handlers.get("message_end")!(finish, h.ctx);
-      expect(h.appended.filter(e => ["context-prune-summary", "context-prune-frontier", "context-prune-chain", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      expect(h.appended.filter(e => ["context-prune-summary", "context-prune-chain", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      const frontiers = h.appended.filter(e => e.type === "context-prune-frontier");
+      expect(frontiers).toHaveLength(mode === "error" ? 0 : 1);
+      if (mode !== "error") expect((frontiers[0].data as any).outcome).toBe("skipped-oversized");
       if (mode !== "budget") expect(inputs.every(text => text.includes(raw))).toBe(true);
       else expect(inputs).toHaveLength(0);
       await h.commands.get("pruner")!("compact", h.ctx);
@@ -387,11 +407,104 @@ describe("full-result quality", () => {
       const rendered = await h.handlers.get("context")!({ messages }, h.ctx);
       expect((rendered?.messages ?? messages).find((m: any) => m.role === "toolResult").content[0].text).toBe(raw);
       expect(h.appended.filter(e => e.type === "context-prune-chain")).toHaveLength(0);
-      // No completed frontier hides the rejected batch from a later successful flush.
+      // Transient failures retry on the next flush; deterministic rejections are final and never re-sent.
       delete h.ctx.model.contextWindow;
-      streamImpl = () => okStream();
+      let later = 0;
+      streamImpl = () => { later++; return okStream(); };
       await h.handlers.get("message_end")!(finish, h.ctx);
+      expect(later).toBe(mode === "error" ? 1 : 0);
+      expect(h.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(mode === "error" ? 1 : 0);
+      if (mode !== "error") {
+        const again = await h.handlers.get("context")!({ messages }, h.ctx);
+        expect((again?.messages ?? messages).find((m: any) => m.role === "toolResult").content[0].text).toBe(raw);
+      }
+    } finally { streamImpl = previous; }
+  });
+
+  it("a rejected batch does not block later batches: B stays raw, C and D publish, B is never re-sent", async () => {
+    const previous = streamImpl;
+    const turn = (id: string, raw: string, t: number) => [
+      { type: "message", message: { role: "user", content: [{ type: "text", text: `do ${id}` }], timestamp: t } },
+      { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: {} }], timestamp: t + 1 } },
+      { type: "message", message: { role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text: raw }], timestamp: t + 2 } },
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: `done ${id}` }], timestamp: t + 3 } },
+    ];
+    const sent: string[] = [];
+    streamImpl = (_model, input) => {
+      const text: string = input.messages[0].content[0].text;
+      const id = ["A", "B", "C", "D"].find(k => text.includes(k.repeat(4)))!;
+      sent.push(id);
+      // B's raw output is 4 chars, so any labelled summary is larger than raw.
+      return { async *[Symbol.asyncIterator]() {}, async result() {
+        return { stopReason: "stop", content: [{ type: "text", text: `[[1:read]] ${id} summary` }], usage: USAGE };
+      } };
+    };
+    try {
+      const branch: any[] = [...turn("A", "AAAA ".repeat(100), 1000), ...turn("B", "BBBB", 2000), ...turn("C", "CCCC ".repeat(100), 3000)];
+      const h = await boot({ branch, chainCompressionEnabled: true, rollingWindow: 0 });
+      const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.handlers.get("message_end")!(finish, h.ctx);
+      expect(sent).toEqual(["A", "B", "C"]);
+      branch.push(...turn("D", "DDDD ".repeat(100), 4000));
+      await h.handlers.get("message_end")!(finish, h.ctx);
+      expect(sent).toEqual(["A", "B", "C", "D"]);
+      const published = h.appended.filter(e => e.type === "context-prune-summary").map(e => (e.data as any).details.toolCallRefs[0].toolCallId);
+      expect(published).toEqual(["A", "C", "D"]);
+      expect(h.appended.filter(e => e.type === "context-prune-frontier").map(e => (e.data as any).outcome)).toEqual(["summarized", "summarized"]);
+      const rawB = async (hh: any) => {
+        const messages = hh.branch.filter((e: any) => e.type === "message").map((e: any) => e.message);
+        const rendered = await hh.handlers.get("context")!({ messages }, hh.ctx);
+        return (rendered?.messages ?? messages).find((m: any) => m.role === "toolResult" && m.toolCallId === "B")?.content[0].text;
+      };
+      expect(await rawB(h)).toBe("BBBB");
+      await h.commands.get("pruner")!("compact", h.ctx);
+      expect(await rawB(h)).toBe("BBBB");
+      const reloaded = await boot({ branch: h.branch, chainCompressionEnabled: true, rollingWindow: 0 });
+      await reloaded.handlers.get("session_start")!({}, reloaded.ctx);
+      await reloaded.handlers.get("message_end")!(finish, reloaded.ctx);
+      await reloaded.commands.get("pruner")!("compact", reloaded.ctx);
+      expect(sent).toEqual(["A", "B", "C", "D"]);
+      expect(await rawB(reloaded)).toBe("BBBB");
+      expect(reloaded.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(0);
+    } finally { streamImpl = previous; }
+  });
+
+  it("a stale UI context during a rejection does not change the flush outcome", async () => {
+    const previous = streamImpl;
+    streamImpl = (_model, input) => ({ async *[Symbol.asyncIterator]() {}, async result() {
+      const usable = input.messages[0].content[0].text.includes("yyyy");
+      return { stopReason: usable ? "stop" : "length", content: [{ type: "text", text: usable ? "[[1:read]] ok" : "partial" }], usage: USAGE };
+    } });
+    try {
+      const h = await boot({ branch: [...pendingBatchEntries("first", "x".repeat(200), 100), ...pendingBatchEntries("second", "y".repeat(200), 2000)] });
+      h.ctx.ui.notify = () => { throw new Error("This extension ctx is stale after session replacement or reload."); };
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, h.ctx);
+      const frontiers = h.appended.filter(e => e.type === "context-prune-frontier");
+      expect(frontiers).toHaveLength(1);
+      expect((frontiers[0].data as any).outcome).toBe("summarized");
       expect(h.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(1);
+      expect((h.appended.filter(e => e.type === "context-prune-flush-metrics").at(-1)!.data as any).outcome).toBe("summarized");
+    } finally { streamImpl = previous; }
+  });
+
+  it("charges a billed error stop and keeps the batch pending without a frontier", async () => {
+    const previous = streamImpl;
+    const usage = { ...USAGE, cost: { ...USAGE.cost, total: 0.02 } };
+    streamImpl = () => ({ async *[Symbol.asyncIterator]() {}, async result() {
+      return { stopReason: "error", errorMessage: "The model refused to complete the request", content: [], usage };
+    } });
+    try {
+      const h = await boot({ branch: pendingBatchEntries("charged", "y".repeat(200), 100) });
+      const costs: any[] = [];
+      h.pi.events.emit = (channel: string, payload: any) => { if (channel === "cost:external") costs.push(payload); };
+      await h.handlers.get("session_start")!({}, h.ctx);
+      await h.handlers.get("message_end")!({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }, h.ctx);
+      expect((h.appended.filter(e => e.type === "context-prune-stats").at(-1)!.data as any).totalCost).toBeCloseTo(0.02);
+      expect(costs.at(-1)).toMatchObject({ source: "pi-condense", totalCost: 0.02 });
+      expect(h.appended.filter(e => ["context-prune-frontier", "context-prune-summary", "context-prune-index"].includes(e.type))).toHaveLength(0);
+      expect(h.notifications.at(-1)).toContain("refused");
     } finally { streamImpl = previous; }
   });
 
@@ -1467,7 +1580,7 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
     expect(toolResultText(rendered, "r2")).toBe("protected content");
   });
 
-  it("an oversized summary retains raw output without a frontier or floor", async () => {
+  it("an oversized summary retains raw output, advances the frontier, and sets no floor", async () => {
     const branch: any[] = [];
     const { handlers, ctx, appended } = await boot({ protectedPaths: [PROTECTED_GLOB], branch });
 
@@ -1494,7 +1607,8 @@ describe("supersede floor cadence (spec 2026-09-07)", () => {
 
     expect(appended.some((e) => e.type === "context-prune-index")).toBe(false);
     const frontierEntries = appended.filter((e) => e.type === "context-prune-frontier");
-    expect(frontierEntries).toHaveLength(0);
+    expect(frontierEntries).toHaveLength(1);
+    expect((frontierEntries[0].data as any).outcome).toBe("skipped-oversized");
     expect(toolResultText(await render(branch, handlers, ctx), "bash1")).toBe("x");
 
     const rendered = await render(branch, handlers, ctx);
