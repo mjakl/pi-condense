@@ -71,7 +71,7 @@ pi install npm:pi-condense
 
 With the default `agent-message` trigger (and `autoBudgetThreshold`/`budgetTurnDelta` unset), a non-interactive (`pi -p`) session sees its first flush only at the final reply - set `autoBudgetThreshold` (e.g. `0.8`) so flushes also fire mid-run. This is a property of single-prompt sessions, not a defect in the default.
 
-Before any summarizer call, a pre-flush pipeline can drop or redirect a batch at zero LLM cost: protected tools/paths are never touched, content-hash duplicates are aliased to the original, batches too small to be worth summarizing are skipped outright, and oversized single results are spilled straight to a sidecar file. Closed tool-call chains older than a rolling window are additionally range-compressed. Full pipeline and each safeguard: [PRUNING.md § Pre-flush Pipeline & Safeguards](PRUNING.md#pre-flush-pipeline--safeguards), [§ Chain Compression](PRUNING.md#chain-compression).
+Before any summarizer call, protected tools/paths and non-text results stay verbatim, content-hash duplicates are aliased to completed originals, and trivial batches stay raw without an LLM call. Large results are sent in full or retained, not replaced by previews. Closed tool-call chains older than a rolling window are additionally range-compressed. Full pipeline and each safeguard: [PRUNING.md § Pre-flush Pipeline & Safeguards](PRUNING.md#pre-flush-pipeline--safeguards), [§ Chain Compression](PRUNING.md#chain-compression).
 
 ### External cost channel
 
@@ -94,11 +94,13 @@ Every summarizer cost update is emitted on the shared `pi.events` channel `cost:
 
 Diagnostics remain in `context-prune-diagnostic` session entries only, never in the footer or the model's context. Full mechanics: [PRUNING.md § Diagnostics](PRUNING.md#diagnostics).
 
-### Uncovered chains compress too
+### Preserve evidence before compressing chains
 
-`/pruner compact` and the automatic flush both compress eligible chains **even when no per-batch summary ever covered them** - a trivial batch, an oversized-skip, a fully-deduped batch, or a plain capture miss all used to strand the chain permanently with a `no-summary` skip. These chains now get a deterministic, zero-LLM-cost stub body (call count, tool histogram, span duration, working `t<N>` refs) instead; the raw tool outputs are archived exactly like the covered path and stay recoverable via `context_tree_query`. **Exception:** a zero-coverage chain whose middle calls are *all* protected stays uncompressed (plain `no-summary` skip, no diagnostic) - every output would relocate verbatim into the synthetic body anyway, so compressing saves nothing. Full mechanics: [PRUNING.md § Deterministic fallback (uncovered chains)](PRUNING.md#deterministic-fallback-uncovered-chains).
+`/pruner compact` and automatic flush require observed summaries for every unprotected tool-result occurrence before dropping a chain. Failed, unsupported, trivial or only partially summarized outputs stay in context rather than becoming metadata-only stubs. Historical deterministic chain entries remain readable. See [summary coverage before chain compression](PRUNING.md#summary-coverage-before-chain-compression).
 
-**Limitation:** a chain stranded in an otherwise-idle session is not healed by `/pruner now` on an empty queue (the flush returns early before chain detection runs at all) - it heals on the next flush that has any work, or immediately via `/pruner compact`.
+The summarizer receives complete captured text, without a per-result character cutoff. Transient failures leave the batch pending; length-truncated, estimated-over-budget or larger-than-raw summaries keep the originals verbatim, advance the frontier and are not retried. `context_tree_query` output is always protected from lossy re-summarization, including after chain relocation. Non-text results stay raw because the summarizer is text-only. This uses more summarizer input and may retain more main-agent context; it does not guarantee lossless LLM summaries or change the query tool's explicit response limit.
+
+`/pruner compact` applies the same coverage gate; it cannot force unsummarized originals out of context. `/pruner now` returns before chain detection when the pending queue is empty.
 
 ### Context metrics (`context-prune-flush-metrics`)
 
@@ -176,7 +178,7 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 | `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn`; the trigger point is capped at 300k tokens |
 | `frontierGapThresholdTokens` | `null` | Opt-in absolute-token flush trigger: fires at `turn_end` once the un-pruned tail past the prune frontier reaches N tokens, regardless of window size; recommended starting value `80000` |
 | `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md", "**/gauntlet-overrides.md"]` | Tool names / path globs that are never summarized; older successful `read` results may be stubbed only when a later read of the same path has identical text-only output. Distinct pages, changed content, and failed reads stay verbatim. See [supersession](PRUNING.md#protected-tools--paths). |
-| `spillThreshold` | `65536` | Chars above which a single oversized result spills straight to a sidecar file |
+| `spillThreshold` | `65536` | Sidecar threshold for missing archives of summary-covered chains; new results are not eagerly spilled |
 
 The default also protects reads of [pi-gauntlet](https://github.com/jjuraszek/pi-gauntlet)'s per-repo `gauntlet-overrides.md` so the repo's harness contract stays available for gate decisions after pruning.
 

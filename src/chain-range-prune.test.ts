@@ -12,6 +12,12 @@ import type { ChainCompressionEntry } from "./types.js";
 import { expectNoOrphanToolResults, expectZeroOrphanSweep } from "./test-support.js";
 
 
+test("persisted compression entries cannot drop unprotected image content", () => {
+  const result = { ...toolResult(3, "image"), content: [{ type: "image", data: "AA==", mimeType: "image/png" }] };
+  const messages = [userMsg(1), assistantWithTools(2, ["image"]), result, assistantText(4, true), summaryMsg(5, ["image"])];
+  expect(applyChainCompressions(messages, [entry("b1", 1, ["image"], 4)], () => "summary", true)).toEqual(messages);
+});
+
 test("persisted compression entries cannot drop protected image content", () => {
   for (const content of [
     [{ type: "image", data: "AA==", mimeType: "image/png" }],

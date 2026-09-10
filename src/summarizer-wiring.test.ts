@@ -154,8 +154,10 @@ function makeBatch() {
 
 const distinctConfig = { ...DEFAULT_CONFIG, summarizerModel: "provider-a/primary-model" };
 
+const text = (outcome: any) => (outcome.kind === "ok" ? outcome.result.summaryText : undefined);
+
 describe("runSummarization wiring — same-model no-op (legacy path)", () => {
-  it("summarizerModel=default: transient failure notifies error, returns null, controller untouched", async () => {
+  it("summarizerModel=default: transient failure notifies error, returns transient, controller untouched", async () => {
     streamImpl = () => errStream("provider overloaded");
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
@@ -163,11 +165,49 @@ describe("runSummarization wiring — same-model no-op (legacy path)", () => {
     const r = await summarizeBatch(makeBatch(), { ...DEFAULT_CONFIG, summarizerModel: "default" }, ctx, {
       controller,
     });
-    expect(r).toBeNull();
+    expect(r.kind).toBe("transient");
     expect(controller.inFallback).toBe(false);
     expect(notes).toHaveLength(1);
     expect(notes[0].level).toBe("error");
     expect(notes[0].msg).toContain("provider overloaded");
+  });
+});
+
+describe("usage and UI boundaries", () => {
+  it("charges a billed error stop once, before classification", async () => {
+    streamImpl = () => errStream("refusal");
+    const charged: unknown[] = [];
+    const r = await summarizeBatch(makeBatch(), { ...DEFAULT_CONFIG, summarizerModel: "default" }, makeCtx([]), {
+      onUsage: (usage) => charged.push(usage),
+    });
+    expect(r.kind).toBe("transient");
+    expect(charged).toEqual([USAGE]);
+  });
+
+  it("charges every completed attempt exactly once across retries and fallback", async () => {
+    streamImpl = (model) => (model.id === PRIMARY.id ? errStream("down") : okStream("- rescued"));
+    let charged = 0;
+    const r = await summarizeBatch(makeBatch(), distinctConfig, makeCtx([]), {
+      controller: new FallbackController(), onUsage: () => charged++,
+    });
+    expect(text(r)).toBe("- rescued");
+    expect(charged).toBe(5);
+  });
+
+  it("an unusable response stays unusable when the UI context is stale (no retry, no fallback)", async () => {
+    let calls = 0;
+    streamImpl = () => {
+      calls++;
+      return { async *[Symbol.asyncIterator]() {}, async result() {
+        return { stopReason: "length", content: [{ type: "text", text: "partial" }], usage: USAGE };
+      } };
+    };
+    const ctx = makeCtx([]);
+    ctx.ui.notify = () => { throw new Error("This extension ctx is stale after session replacement or reload."); };
+    const r = await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller: new FallbackController() });
+    expect(r.kind).toBe("unusable");
+    expect(calls).toBe(1);
+    expect(delays).toEqual([]);
   });
 });
 
@@ -183,7 +223,7 @@ describe("runSummarization wiring — enter fallback", () => {
     const controller = new FallbackController();
     const r = await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "high" }, ctx, { controller });
     expect(efforts).toEqual(["high", "high", "high", "high", "omitted"]);
-    expect(r?.summaryText).toBe("- fallback summary");
+    expect(text(r)).toBe("- fallback summary");
     expect(controller.inFallback).toBe(true);
     const warnings = notes.filter((n) => n.level === "warning");
     const errors = notes.filter((n) => n.level === "error");
@@ -206,20 +246,20 @@ describe("runSummarization wiring — enter fallback", () => {
     seen.length = 0;
     notes.length = 0;
     const r = await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller }); // steady-state
-    expect(r?.summaryText).toBe("- ok");
+    expect(text(r)).toBe("- ok");
     expect(seen).toEqual([SESSION.id]); // primary never called again before cooldown
     expect(notes).toHaveLength(0);
   });
 });
 
 describe("runSummarization wiring — both-down + deferred warning", () => {
-  it("primary + fallback both transient: null, error notify, enters fallback with owed warning", async () => {
+  it("primary + fallback both transient: transient, error notify, enters fallback with owed warning", async () => {
     streamImpl = () => errStream("everything down");
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
     const controller = new FallbackController();
     const r = await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
-    expect(r).toBeNull();
+    expect(r.kind).toBe("transient");
     expect(controller.inFallback).toBe(true);
     const warnings = notes.filter((n) => n.level === "warning");
     const errors = notes.filter((n) => n.level === "error");
@@ -230,7 +270,7 @@ describe("runSummarization wiring — both-down + deferred warning", () => {
     streamImpl = (model) => (model.id === PRIMARY.id ? errStream("still down") : okStream("- rescued"));
     notes.length = 0;
     const r2 = await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
-    expect(r2?.summaryText).toBe("- rescued");
+    expect(text(r2)).toBe("- rescued");
     expect(notes.filter((n) => n.level === "warning")).toHaveLength(1);
   });
 });
@@ -243,7 +283,7 @@ describe("runSummarization wiring — auth", () => {
     const ctx = makeCtx(notes);
     ctx.modelRegistry.getApiKeyAndHeaders = async () => ({ ok: false, error: "missing credential" });
     const controller = new FallbackController();
-    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).kind).toBe("auth");
     expect(calls).toBe(0);
     expect(controller.inFallback).toBe(false);
     expect(notes).toEqual([{ msg: "pruner: summarization failed: missing credential", level: "error" }]);
@@ -282,13 +322,13 @@ describe("runSummarization wiring — abort", () => {
 });
 
 describe("runSummarization wiring — timeouts", () => {
-  it("idle timeout (default model): transient warning, returns null", async () => {
+  it("idle timeout (default model): transient warning, returns transient", async () => {
     streamImpl = (_m, _i, opts) => hangingStream(opts);
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
     const cfg = { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerIdleTimeoutMs: 20, summarizerMaxTimeoutMs: 0 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, {});
-    expect(r).toBeNull();
+    expect(r.kind).toBe("transient");
     const warnings = notes.filter((n) => n.level === "warning");
     expect(warnings).toHaveLength(1);
     expect(warnings[0].msg).toMatch(/stalled/);
@@ -301,7 +341,7 @@ describe("runSummarization wiring — timeouts", () => {
     const ctx = makeCtx(notes);
     const cfg = { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerIdleTimeoutMs: 0, summarizerMaxTimeoutMs: 20 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, {});
-    expect(r).toBeNull();
+    expect(r.kind).toBe("transient");
     const warnings = notes.filter((n) => n.level === "warning");
     expect(warnings).toHaveLength(1);
     expect(warnings[0].msg).toMatch(/ceiling/);
@@ -314,20 +354,20 @@ describe("runSummarization wiring — timeouts", () => {
     const controller = new FallbackController();
     const cfg = { ...distinctConfig, summarizerIdleTimeoutMs: 20 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, { controller });
-    expect(r?.summaryText).toBe("- rescued");
+    expect(text(r)).toBe("- rescued");
     expect(controller.inFallback).toBe(true);
     expect(notes.filter((n) => n.level === "warning")).toHaveLength(1); // generic "enter" fallback warning
     expect(notes.filter((n) => n.level === "error")).toHaveLength(0);
   });
 
-  it("both time out: null, both-down notice at warning severity", async () => {
+  it("both time out: transient, both-down notice at warning severity", async () => {
     streamImpl = (_m, _i, opts) => hangingStream(opts);
     const notes: Note[] = [];
     const ctx = makeCtx(notes);
     const controller = new FallbackController();
     const cfg = { ...distinctConfig, summarizerIdleTimeoutMs: 20 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, { controller });
-    expect(r).toBeNull();
+    expect(r.kind).toBe("transient");
     expect(notes.filter((n) => n.level === "warning")).toHaveLength(1);
     expect(notes.filter((n) => n.level === "error")).toHaveLength(0);
   });
@@ -349,7 +389,7 @@ describe("runSummarization wiring — timeouts", () => {
     const ctx = makeCtx(notes);
     const cfg = { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerIdleTimeoutMs: 0, summarizerMaxTimeoutMs: 0 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, {});
-    expect(r?.summaryText).toBe("- ok");
+    expect(text(r)).toBe("- ok");
     expect(notes).toHaveLength(0);
   });
 });
@@ -363,7 +403,7 @@ describe("runSummarization wiring — idle reset keeps a flowing stream alive", 
     const ctx = makeCtx(notes);
     const cfg = { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerIdleTimeoutMs: 25, summarizerMaxTimeoutMs: 0 };
     const r = await summarizeBatch(makeBatch(), cfg, ctx, {});
-    expect(r?.summaryText).toBe("- flowing summary");
+    expect(text(r)).toBe("- flowing summary");
     expect(notes.filter((n) => n.level === "warning")).toHaveLength(0);
   });
 });
@@ -397,7 +437,7 @@ describe("bounded primary retries", () => {
       waiting = new Promise<void>((resolve) => { delayStarted = resolve; });
       release();
     }
-    expect((await result)?.summaryText).toBe("fallback");
+    expect(text(await result)).toBe("fallback");
     expect(events).toEqual([...expected, PRIMARY.id, SESSION.id]);
     expect(delays).toEqual([3000, 9000, 27000]);
     events.length = 0;
@@ -443,7 +483,7 @@ describe("bounded primary retries", () => {
       };
       const notes: Note[] = [];
       const controller = new FallbackController();
-      expect((await summarizeBatch(makeBatch(), distinctConfig, makeCtx(notes), { controller }))?.summaryText)
+      expect(text(await summarizeBatch(makeBatch(), distinctConfig, makeCtx(notes), { controller })))
         .toBe("- primary");
       expect(seen).toEqual(Array(successAt).fill(PRIMARY.id));
       expect(delays).toEqual([3000, 9000, 27000].slice(0, successAt - 1));
@@ -458,10 +498,10 @@ describe("bounded primary retries", () => {
     const notes: Note[] = [];
     const controller = new FallbackController();
     const ctx = makeCtx(notes);
-    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).kind).toBe("transient");
     expect(seen).toEqual([...Array(4).fill(PRIMARY.id), SESSION.id]);
     seen.length = 0;
-    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).kind).toBe("transient");
     expect(seen).toEqual([SESSION.id]);
     seen.length = 0;
     streamImpl = (model, _input, opts) => {
@@ -469,7 +509,7 @@ describe("bounded primary retries", () => {
       expect(Object.hasOwn(opts, "reasoning")).toBe(false);
       return okStream("- recovered");
     };
-    expect((await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "off" }, ctx, { controller }))?.summaryText)
+    expect(text(await summarizeBatch(makeBatch(), { ...distinctConfig, summarizerThinking: "off" }, ctx, { controller })))
       .toBe("- recovered");
     expect(seen).toEqual([SESSION.id]);
   });
@@ -489,7 +529,7 @@ describe("bounded primary retries", () => {
           };
         };
         const controller = new FallbackController();
-        expect(await summarizeBatch(makeBatch(), distinctConfig, makeCtx([]), { controller })).toBeNull();
+        expect((await summarizeBatch(makeBatch(), distinctConfig, makeCtx([]), { controller })).kind).toBe("unusable");
         expect(calls).toBe(afterTransient ? 2 : 1);
         expect(controller.inFallback).toBe(false);
       });
@@ -504,7 +544,7 @@ describe("bounded primary retries", () => {
     ctx.modelRegistry.getApiKeyAndHeaders = async () => ++auths === 1
       ? { ok: true, apiKey: "k", headers: {} } : { ok: false, error: "missing credential" };
     const controller = new FallbackController();
-    expect(await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).toBeNull();
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller })).kind).toBe("auth");
     expect(auths).toBe(2);
     expect(streams).toBe(1);
     expect(controller.inFallback).toBe(false);
@@ -555,9 +595,9 @@ describe("bounded primary retries", () => {
       expect(Object.hasOwn(opts, "reasoning")).toBe(model.id === PRIMARY.id);
       return model.id === PRIMARY.id ? errStream("down") : okStream("fused");
     };
-    expect((await summarizeRange("summaries", { ...distinctConfig, summarizerThinking: "off" }, makeCtx([]), {
+    expect(text(await summarizeRange("summaries", { ...distinctConfig, summarizerThinking: "off" }, makeCtx([]), {
       controller: new FallbackController(),
-    }))?.summaryText).toBe("fused");
+    }))).toBe("fused");
     expect(seen).toEqual([...Array(4).fill(PRIMARY.id), SESSION.id]);
   });
 

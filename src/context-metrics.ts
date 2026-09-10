@@ -1,3 +1,4 @@
+import { hasNonTextContent } from "./batch-capture.js";
 import { detectChains, isChainAnchorCustom } from "./chain-detector.js";
 import { occKey, resultTimestampOf } from "./occurrence-key.js";
 import type { ContextMetricsSnapshot, PruneFrontier } from "./types.js";
@@ -146,6 +147,7 @@ export function computeContextMetrics(
     if (i < boundaryTurnEndIdx && boundaryExcludedIds.has(m.toolCallId)) continue;
     const key = occKey(m.toolCallId, resultTimestampOf(m.timestamp));
     if (isSummarized(key)) continue;
+    if (hasNonTextContent(m)) continue; // never reclaimable, so not a gap
     const args = findArgsForToolCallId(branch, i, m.toolCallId);
     if (isProtected(m.toolName, args)) continue;
     frontierGapTokens += tokensOf(m);

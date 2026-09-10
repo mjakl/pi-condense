@@ -1,8 +1,8 @@
 import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { CUSTOM_TYPE_SUMMARY } from "./types.js";
+import { CUSTOM_TYPE_SUMMARY, QUERY_TOOL_NAME } from "./types.js";
 import type { ChainCompressionEntry } from "./types.js";
 import { substituteBlockRefs } from "./nested-placeholders.js";
-import { extractToolResultText } from "./batch-capture.js";
+import { extractToolResultText, hasNonTextContent } from "./batch-capture.js";
 import { isChainAnchorCustom } from "./chain-detector.js";
 import { bareToolCallId, occKey, resultTimestampOf } from "./occurrence-key.js";
 import type { DiagnosticSink } from "./diagnostics.js";
@@ -100,16 +100,11 @@ export function resolveRange(
   return { startIndex, endIndex };
 }
 
-export function hasUnsafeProtectedOutput(
-  messages: any[],
-  range: { startIndex: number; endIndex: number },
-  protectedToolCallIds: string[] = [],
-): boolean {
-  const protectedIds = new Set(protectedToolCallIds);
+// Text relocation and summaries cannot carry images; applies to legacy entries too.
+export function hasNonTextOutput(messages: any[], range: { startIndex: number; endIndex: number }): boolean {
   for (let i = range.startIndex + 1; i < range.endIndex; i++) {
     const msg = messages[i];
-    if (msg.role === "toolResult" && protectedIds.has(msg.toolCallId) &&
-      Array.isArray(msg.content) && msg.content.some((block: any) => block.type !== "text")) return true;
+    if (msg.role === "toolResult" && hasNonTextContent(msg)) return true;
   }
   return false;
 }
@@ -149,7 +144,7 @@ export function applyChainCompressions(
       continue;
     }
     // Persisted entries must obey the same text-only relocation limit as new decisions.
-    if (hasUnsafeProtectedOutput(messages, range, entry.protectedToolCallIds)) continue;
+    if (hasNonTextOutput(messages, range)) continue;
     resolved.push({ entry, ...range });
   }
 
@@ -199,7 +194,7 @@ export function applyChainCompressions(
         inRangeBareIds.push(msg.toolCallId);
         droppedBareIds.add(msg.toolCallId);
         droppedOccKeys.add(occKey(msg.toolCallId, resultTimestampOf(msg.timestamp)));
-        if (protectedIds.has(msg.toolCallId)) {
+        if (protectedIds.has(msg.toolCallId) || msg.toolName === QUERY_TOOL_NAME) {
           const arr = protectedByBlock.get(entry.blockId) ?? [];
           arr.push({ tool: msg.toolName, text: extractToolResultText(msg) });
           protectedByBlock.set(entry.blockId, arr);

@@ -1,10 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import type { CapturedBatch, CapturedToolCall } from "./types.js";
-import type { ToolCallIndexer } from "./indexer.js";
 import { hashToolResult } from "./content-hash.js";
-import { occKey } from "./occurrence-key.js";
 
 /** Replace anything outside [A-Za-z0-9_-] so the id can't escape the blob dir. */
 export function sanitizeId(toolCallId: string): string {
@@ -35,12 +31,6 @@ export function headPreview(text: string, maxBytes: number): string {
   return slice;
 }
 
-interface SpillConfig {
-  spillThreshold: number;
-  spillPreviewBytes: number;
-  dedupByContentHash: boolean;
-}
-
 interface SpillableRecord {
   toolName: string;
   resultText: string;
@@ -50,61 +40,11 @@ interface SpillableRecord {
   contentHash?: string;
 }
 
-/** Mutates `record` in place: spillBytes/resultPreview/spillPath/contentHash set, resultText emptied. */
+/** Mutates archival storage only; spilling does not establish summary coverage. */
 export function applySpill(record: SpillableRecord, spillPath: string, previewBytes: number): void {
   record.spillBytes = Buffer.byteLength(record.resultText, "utf8");
   record.resultPreview = headPreview(record.resultText, previewBytes);
   record.spillPath = spillPath;
   record.contentHash = hashToolResult(record.toolName, record.resultText);
   record.resultText = "";
-}
-
-export async function spillOversizedBatch(args: {
-  batch: CapturedBatch;
-  indexer: ToolCallIndexer;
-  config: SpillConfig;
-  sessionDir: string;
-  sessionId: string;
-  appendEntry: (customType: string, data?: unknown) => void;
-}): Promise<Set<string>> {
-  const { batch, indexer, config, sessionDir, sessionId, appendEntry } = args;
-  const handled = new Set<string>();
-  const toIndex: CapturedToolCall[] = [];
-
-  for (const tc of batch.toolCalls) {
-    if (tc.resultText.length < config.spillThreshold) continue;
-
-    const key = occKey(tc.toolCallId, tc.resultTimestamp);
-
-    if (config.dedupByContentHash) {
-      const original = indexer.lookupByContent(tc.toolName, tc.resultText);
-      if (original && original !== key) {
-        indexer.registerDuplicate(key, original, appendEntry);
-        handled.add(tc.toolCallId);
-        continue;
-      }
-    }
-
-    const path = blobPathFor(sessionDir, sessionId, key);
-    try {
-      await mkdir(blobDirFor(sessionDir, sessionId), { recursive: true });
-      await writeFile(path, tc.resultText, "utf-8");
-    } catch (err) {
-      console.error(`spill: failed to write sidecar for ${tc.toolCallId} at ${path}:`, err);
-      continue;
-    }
-
-    applySpill(tc, path, config.spillPreviewBytes);
-    toIndex.push(tc);
-    handled.add(tc.toolCallId);
-  }
-
-  if (toIndex.length > 0) {
-    indexer.addBatch(
-      { turnIndex: batch.turnIndex, timestamp: batch.timestamp, assistantText: "", toolCalls: toIndex },
-      appendEntry,
-    );
-  }
-
-  return handled;
 }

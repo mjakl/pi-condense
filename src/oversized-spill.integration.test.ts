@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { ToolCallIndexer } from "./indexer.js";
 import { occKey } from "./occurrence-key.js";
-import { spillOversizedBatch, blobPathFor } from "./spill.js";
+import { blobPathFor } from "./spill.js";
+import { spillOversizedBatch } from "./legacy-spill.test-support.js";
 import { pruneMessages } from "./pruner.js";
 import type { CapturedBatch } from "./types.js";
 import { CUSTOM_TYPE_INDEX } from "./types.js";
@@ -12,7 +13,7 @@ import { CUSTOM_TYPE_INDEX } from "./types.js";
 const cfg = { spillThreshold: 10, spillPreviewBytes: 16, dedupByContentHash: true };
 const batch = (tc: any): CapturedBatch => ({ turnIndex: 0, timestamp: 1, assistantText: "", toolCalls: [tc] });
 
-describe("oversized spill end-to-end", () => {
+describe("legacy oversized spill compatibility", () => {
   it("spills, stubs in context, keeps full body on disk, survives reconstruct", async () => {
     const dir = await mkdtemp(join(tmpdir(), "spill-e2e-"));
     try {

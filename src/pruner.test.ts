@@ -497,7 +497,7 @@ describe("pruneMessages recovery grace", () => {
     expect(out[1].content[0].text).toBe("VERBATIM RECOVERY OUTPUT");
   });
 
-  it("stubs a context_tree_query recovery output aged past the grace window", () => {
+  it("preserves recovery output past the grace window", () => {
     const indexer = makeMockIndexer({
       summarized: new Set(["tc-recover"]),
       shortRefs: new Map([["tc-recover", "t1"]]),
@@ -505,19 +505,17 @@ describe("pruneMessages recovery grace", () => {
     const messages: any[] = [mkAsst("tc-recover", "context_tree_query", 0), mkQueryResult("tc-recover", 1), mkUser(2), mkUser(3), mkUser(4), mkUser(5)];
     const { messages: out } = pruneMessages(messages, indexer, undefined, undefined, undefined, 3);
     const tr = out.find((m: any) => m.toolCallId === "tc-recover") as any;
-    expect(tr.content[0].text).toContain("context_tree_query");
-    expect(tr.content[0].text).not.toBe("VERBATIM RECOVERY OUTPUT");
+    expect(tr.content[0].text).toBe("VERBATIM RECOVERY OUTPUT");
   });
 
-  it("stubs at age 0 when recoveryGraceTurns is 0 (feature off)", () => {
+  it("preserves recovery output even when recoveryGraceTurns is 0", () => {
     const indexer = makeMockIndexer({
       summarized: new Set(["tc-recover"]),
       shortRefs: new Map([["tc-recover", "t1"]]),
     });
     const messages = [mkAsst("tc-recover", "context_tree_query", 0), mkQueryResult("tc-recover", 1)];
     const { messages: out } = pruneMessages(messages, indexer, undefined, undefined, undefined, 0);
-    expect(out[1].content[0].text).not.toBe("VERBATIM RECOVERY OUTPUT");
-    expect(out[1].content[0].text).toContain("context_tree_query");
+    expect(out[1].content[0].text).toBe("VERBATIM RECOVERY OUTPUT");
   });
 
   it("does not apply the grace window to non-context_tree_query outputs", () => {
@@ -575,7 +573,7 @@ describe("pruneMessages recovery grace", () => {
     expect(out[1].content[0].text).toBe("VERBATIM RECOVERY OUTPUT");
   });
 
-  it("stubs a spilled context_tree_query recovery output aged past the grace window to the spill-pointer stub", () => {
+  it("preserves previously spilled recovery output past the grace window", () => {
     const indexer = makeMockIndexer({
       summarized: new Set(["tc-recover"]),
       shortRefs: new Map([["tc-recover", "t1"]]),
@@ -588,9 +586,7 @@ describe("pruneMessages recovery grace", () => {
     const messages: any[] = [mkAsst("tc-recover", "context_tree_query", 0), mkQueryResult("tc-recover", 1), mkUser(2), mkUser(3), mkUser(4), mkUser(5)];
     const { messages: out } = pruneMessages(messages, indexer, undefined, undefined, undefined, 3);
     const tr = out.find((m: any) => m.toolCallId === "tc-recover") as any;
-    expect(tr.content[0].text).not.toBe("VERBATIM RECOVERY OUTPUT");
-    expect(tr.content[0].text).toContain("/blobs/tc-recover.txt");
-    expect(tr.content[0].text).toContain("spilled");
+    expect(tr.content[0].text).toBe("VERBATIM RECOVERY OUTPUT");
   });
 });
 

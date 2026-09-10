@@ -154,17 +154,8 @@ describe("id collision, end to end", () => {
     expectNoOrphanToolResults(out.messages);
   });
 
-  // Regression for the bare-id keying bug (ref #8): registerSummaryBody keyed
-  // with `tc.toolCallId` (no resultTimestamp) mismatches hasPerBatchSummaryCoveringAny's
-  // occurrence-key lookups, so both chains fall through to the "no per-batch
-  // summary covers this span" branch. Pre-2026-08-14 that branch was a permanent
-  // no-summary skip (the bug this test used to pin). Since the deterministic
-  // backfill fallback (doc/specs/2026-08-14-uncovered-chain-deterministic-backfill.md),
-  // that branch instead compresses deterministically from already-indexed
-  // records (both chains' tool calls were indexed via addBatch, just not
-  // summary-covered under the right key) - so the keying bug can no longer
-  // strand a chain through this path. Pin the new correct behavior instead.
-  test("live-flush bare-id keying bug: chains compress deterministically instead of stranding", async () => {
+  // A bare-id summary cannot authorize dropping a timestamped occurrence.
+  test("live-flush bare-id keying mismatch retains originals",  async () => {
     const messages = buildSession();
     // Mirrors the production BUG exactly: `tc.toolCallId` with no resultTimestamp,
     // matching index.ts's pre-fix `batch.toolCalls.map((tc) => tc.toolCallId)`.
@@ -172,11 +163,8 @@ describe("id collision, end to end", () => {
     const out = pruneMessages(messages, indexer, chainConfig);
 
     const synthetics = syntheticsOf(out.messages);
-    expect(synthetics).toHaveLength(2);
-    for (const s of synthetics) {
-      expect(s.content[0].text).toContain("Deterministic chain compression");
-      expect(s.content[0].text).toMatch(/Refs: t\d+/);
-    }
+    expect(synthetics).toHaveLength(0);
+    expect(out.messages.find((m: any) => m.timestamp === 2150).content[0].text).toBe("OUT 23 first");
     expectNoOrphanToolResults(out.messages);
   });
 

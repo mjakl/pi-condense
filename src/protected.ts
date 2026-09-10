@@ -1,3 +1,5 @@
+import { QUERY_TOOL_NAME } from "./types.js";
+
 /** Structural pick of ContextPruneConfig — keeps this module dependency-free. */
 export interface ProtectionConfig {
   protectedTools: readonly string[];
@@ -47,7 +49,7 @@ export function normalizePath(path: string): string {
 }
 
 export function isProtected(toolName: string, args: unknown, config: ProtectionConfig): boolean {
-  if (config.protectedTools.includes(toolName)) return true;
+  if (toolName === QUERY_TOOL_NAME || config.protectedTools.includes(toolName)) return true;
   if (config.protectedPaths.length === 0) return false;
   const path = (args as Record<string, unknown> | null | undefined)?.path;
   if (typeof path !== "string") return false;
