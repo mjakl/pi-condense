@@ -671,7 +671,7 @@ Edit with `/pruner dedup on|off|status` or the settings overlay.
 
 ### Oversized summary rejection
 
-Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context verbatim, no summary is injected, no index entry is written, and the frontier advances past the batch (`skipped-oversized`). The call's usage is still recorded in `context-prune-stats` and `cost:external`, and a warning is always shown; `quietOversizedSkips` silences only trivial/dedup info notifications. Over-budget input and empty or length-truncated output take the same path: the outcome is deterministic for the same input, so re-sending it would only re-bill the batch and block every batch behind it. A rejected batch is not re-attempted; nothing downstream can stub or chain-drop it because it has no summary coverage.
+Last-resort safeguard: if the summarizer LLM produces a summary longer than the raw tool-result text it would replace, the batch is left untouched — the original tool results stay in context verbatim, no summary is injected, no index entry is written, and the frontier advances past the batch (`skipped-oversized`). The call's usage is still recorded in `context-prune-stats` and `cost:external`, and a warning is always shown; routine trivial/dedup skips are silent (`quietOversizedSkips` is now ignored). Over-budget input and empty or length-truncated output take the same path: the outcome is deterministic for the same input, so re-sending it would only re-bill the batch and block every batch behind it. A rejected batch is not re-attempted; nothing downstream can stub or chain-drop it because it has no summary coverage.
 
 This is rare in practice once `minBatchChars` is on, because the cases where summarization makes things bigger are exactly the cases the trivial-batch skip already catches earlier.
 
@@ -720,7 +720,7 @@ the resolved model differs from `ctx.model`):
 - **Sticky + probe:** while in fallback, all calls route to the session model.
   After a 3-minute cooldown (`COOLDOWN_MS`, internal, not configurable) one
   batch of the next flush probes the primary once, without the 3 retries;
-  success recovers (info notify), transient failure gets one fallback attempt.
+  success recovers silently, transient failure gets one fallback attempt.
   During cooldown, each call gets just one fallback attempt.
 - **In-memory only:** no `context-prune-*` entry; `reset()` on `session_start`.
   A restart mid-outage re-detects on the next flush.

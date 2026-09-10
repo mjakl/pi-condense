@@ -166,6 +166,12 @@ Pin a specific version with `npm:pi-condense@X.Y.Z`. Upgrade by re-running `pi i
 
 By default the extension is **off**. `/pruner on` enables it and it stays enabled across sessions in the same pi agent directory.
 
+## Notifications
+
+Background notifications report failures and actionable problems only: rejected summaries, model/auth errors, timeouts, fallback activation, and failed pruning or compression. Queuing, automatic flushes, success, trivial/dedup skips, model recovery, empty work, and ordinary cancellation are silent. Successful setting changes are silent too; invalid arguments still warn.
+
+Explicit `/pruner status`, `stats`, `help`, and bare setting queries keep their requested output. The footer, settings/tree UI, summary rendering, and manual-prune progress widget are unchanged. The legacy `quietOversizedSkips` setting is accepted but ignored and no longer appears in settings.
+
 ## Configuration - the knobs most people touch
 
 Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_AGENT_DIR` if set, else `~/.pi/agent`). Each pi preset gets its own settings.

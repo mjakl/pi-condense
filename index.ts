@@ -132,7 +132,7 @@ export default function (pi: ExtensionAPI) {
 
   const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-  const safeNotify = (ctx: any, message: string, type: "info" | "warning" | "error" = "info") => {
+  const safeNotify = (ctx: any, message: string, type: "warning" | "error") => {
     try {
       ctx.ui.notify(message, type);
     } catch (err) {
@@ -291,6 +291,9 @@ export default function (pi: ExtensionAPI) {
           appendEntry = (customType: string, data?: unknown) => sessionManager!.appendCustomEntry(customType, data);
         } catch (err) {
           outcome = "error";
+          if (!isStaleContextError(err)) {
+            safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
+          }
           return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
         }
       }
@@ -379,7 +382,7 @@ export default function (pi: ExtensionAPI) {
       //
       // A batch whose entire toolCalls array was just deduped is flagged
       // `isFullyDeduped` so the result loop slots it as "deduped" without
-      // confusing it with the trivial path (different outcome + notification).
+      // confusing it with the trivial path (different outcome).
       const minChars = currentConfig.value.minBatchChars;
       const batchRawChars = batches.map((b) =>
         b.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0),
@@ -644,6 +647,9 @@ export default function (pi: ExtensionAPI) {
         // reflect that in processedBatches rather than reporting 0.
         processedCount = processedBatches.length;
         outcome = "error";
+        if (!isStaleContextError(err)) {
+          safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
+        }
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
@@ -682,48 +688,11 @@ export default function (pi: ExtensionAPI) {
             lowerFloor(supersede, earliestChainStart(compressedEntries));
             statsAccum.addChainsCompressed(compressedEntries.length);
             statsChanged = true;
-            safeNotify(
-              ctx,
-              `pruner: compressed ${compressedEntries.length} chain${compressedEntries.length === 1 ? "" : "s"} (${compressedEntries.map((e) => e.blockId).join(", ")})`,
-              "info",
-            );
           }
         } catch (err) {
           if (!isStaleContextError(err)) {
             safeNotify(ctx, `pruner: chain compression failed: ${errorMessage(err)}`, "warning");
           }
-        }
-      }
-
-      // The legacy setting name covers all non-error skip notifications.
-      if (!currentConfig.value.quietOversizedSkips) {
-        for (const batch of trivialBatches) {
-          const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-          safeNotify(
-            ctx,
-            `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — only ${batchRaw} raw chars (< minBatchChars=${minChars}); no LLM call made; frontier advanced past this range`,
-            "info"
-          );
-        }
-        for (const batch of dedupedBatches) {
-          const idx = batches.indexOf(batch);
-          const n = dedupedPerBatch[idx].toolCalls.length;
-          const chars = dedupedPerBatch[idx].rawChars;
-          safeNotify(
-            ctx,
-            `pruner: deduplicated ${n} tool call${n === 1 ? "" : "s"} (turn ${batch.turnIndex}, ${chars} raw chars) against earlier prunes; no LLM call made; frontier advanced past this range`,
-            "info"
-          );
-        }
-        if (totalDedupedCount > 0 && dedupedBatches.length === 0) {
-          // Partial-dedup case: some tool calls were dedup'd but the rest
-          // of the batch went through the summarizer. Surface a single
-          // aggregate notification so users see the savings.
-          safeNotify(
-            ctx,
-            `pruner: deduplicated ${totalDedupedCount} tool call${totalDedupedCount === 1 ? "" : "s"} against earlier prunes (no LLM call for those); remaining tool calls were summarized normally.`,
-            "info"
-          );
         }
       }
 
@@ -897,18 +866,6 @@ export default function (pi: ExtensionAPI) {
         pushedBatch = true;
         pendingBatches.push(batch);
 
-        // Let the user know a batch is queued
-        const n = pendingBatches.length;
-        const trigger = currentConfig.value.pruneOn === "agent-message"
-          ? "agent's next text response"
-          : "/pruner now";
-        if (currentConfig.value.showPruneStatusLine) {
-          safeNotify(
-            ctx,
-            `pruner: ${n} turn${n === 1 ? "" : "s"} queued — will summarize on ${trigger}`,
-            "info"
-          );
-        }
       }
     }
 
@@ -937,18 +894,6 @@ export default function (pi: ExtensionAPI) {
 
     const n = pendingBatches.length;
     if ((n > 0 || rearmedPending) && !isFlushing && (budgetHit || deltaHit || gapHit)) {
-      const reason = budgetHit ? "context budget reached" : deltaHit ? "context jumped this turn" : "un-pruned tail exceeded frontier gap threshold";
-      // Always surface this flush (even when the routine status line is off): it's a
-      // significant, infrequent event — context crossed a threshold, jumped sharply
-      // this turn, or the un-pruned tail grew past the gap threshold — and it
-      // self-throttles because pendingBatches is drained right after.
-      safeNotify(
-        ctx,
-        n > 0
-          ? `pruner: ${reason} — compacting ${n} pending turn${n === 1 ? "" : "s"}`
-          : `pruner: ${reason} — compacting work recovered after reload`,
-        "info",
-      );
       await flushPending(ctx, {
         delivery: "session",
         trigger: n === 0 ? "rearmed" : budgetHit ? "budget" : deltaHit ? "delta" : "frontier-gap",

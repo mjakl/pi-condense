@@ -280,8 +280,8 @@ export interface ContextPruneConfig {
    */
   batchingMode: BatchingMode;
   /**
-   * Legacy setting name: suppress trivial/dedup skip notifications.
-   * Rejected summaries retain originals and warn regardless of this setting.
+   * Legacy setting, accepted but ignored. Routine skip notifications are gone.
+   * Rejected summaries retain originals and always warn.
    */
   quietOversizedSkips: boolean;
   /**

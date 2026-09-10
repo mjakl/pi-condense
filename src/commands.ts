@@ -153,13 +153,9 @@ function batchingModeDescription(mode: ContextPruneConfig["batchingMode"]): stri
 function pruneStatusLineDescription(config: ContextPruneConfig): string {
   const base = config.showPruneStatusLine ? "ON" : "OFF";
   if (config.showPruneStatusLine) {
-    return `Show the prune footer status line and queued turn notifications. Currently ${base}.`;
+    return `Show the prune footer status line. Currently ${base}.`;
   }
-  return `Hide the prune footer status line and queued turn notifications. Currently ${base}.`;
-}
-
-function quietOversizedSkipsDescription(config: ContextPruneConfig): string {
-  return `${config.quietOversizedSkips ? "Suppress" : "Show"} trivial/dedup skip notifications. Rejected summaries retain originals and always warn.`;
+  return `Hide the prune footer status line. Currently ${base}.`;
 }
 
 function minBatchCharsDescription(config: ContextPruneConfig): string {
@@ -533,13 +529,6 @@ export function registerCommands(
               description: batchingModeDescription(config.batchingMode),
             },
             {
-              id: "quietOversizedSkips",
-              label: "Quiet skip notifications",
-              values: ["true", "false"],
-              currentValue: String(config.quietOversizedSkips),
-              description: quietOversizedSkipsDescription(config),
-            },
-            {
               id: "minBatchChars",
               label: "Min batch chars",
               values: MIN_BATCH_CHARS_PRESETS.map((p) => p.value),
@@ -705,12 +694,6 @@ export function registerCommands(
               if (batchingItem) {
                 batchingItem.description = batchingModeDescription(newConfig.batchingMode);
               }
-            } else if (id === "quietOversizedSkips") {
-              newConfig.quietOversizedSkips = newValue === "true";
-              const quietItem = items.find((item) => item.id === "quietOversizedSkips");
-              if (quietItem) {
-                quietItem.description = quietOversizedSkipsDescription(newConfig);
-              }
             } else if (id === "minBatchChars") {
               const parsed = Number.parseInt(newValue, 10);
               newConfig.minBatchChars = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG.minBatchChars;
@@ -812,7 +795,6 @@ export function registerCommands(
         case "on": {
           currentConfig.value = { ...currentConfig.value, enabled: true };
           await saveConfig(currentConfig.value);
-          ctx.ui.notify("Context pruning enabled.");
           setPruneStatusWidget(ctx, currentConfig.value);
           break;
         }
@@ -821,7 +803,6 @@ export function registerCommands(
         case "off": {
           currentConfig.value = { ...currentConfig.value, enabled: false };
           await saveConfig(currentConfig.value);
-          ctx.ui.notify("Context pruning disabled.");
           setPruneStatusWidget(ctx, currentConfig.value);
           break;
         }
@@ -849,7 +830,6 @@ export function registerCommands(
         case "tree": {
           const roots = buildPruneTree(ctx, indexer);
           if (roots.length === 0) {
-            ctx.ui.notify("No pruned tool calls found in this session.", "info");
             break;
           }
 
@@ -899,8 +879,6 @@ export function registerCommands(
               summarizerThinking: parsed.thinking ?? currentConfig.value.summarizerThinking,
             };
             saveConfig(currentConfig.value);
-            const thinkingText = parsed.thinking ? ` with thinking ${parsed.thinking}` : "";
-            ctx.ui.notify(`Summarizer model set to: ${parsed.model}${thinkingText}`);
           }
           break;
         }
@@ -927,7 +905,6 @@ export function registerCommands(
             return;
           }
           saveConfig(currentConfig.value);
-          ctx.ui.notify(`Summarizer thinking set to: ${currentConfig.value.summarizerThinking}`);
           break;
         }
 
@@ -968,7 +945,6 @@ export function registerCommands(
             currentConfig.value = { ...currentConfig.value, batchingMode: batchArg as ContextPruneConfig["batchingMode"] };
           }
           saveConfig(currentConfig.value);
-          ctx.ui.notify(`Batching mode set to: ${batchingModeLabel(currentConfig.value.batchingMode)}`);
           break;
         }
 
@@ -977,29 +953,7 @@ export function registerCommands(
         // the user invoking /pruner compact is explicit intent.
         case "compact": {
           try {
-            const { compressedEntries, skipped } = await compactChains(ctx);
-            if (compressedEntries.length === 0) {
-              ctx.ui.notify(
-                skipped > 0
-                  ? `pruner: no chains eligible for compaction (${skipped} skipped — no per-batch summary available)`
-                  : "pruner: no chains eligible for compaction",
-                "info",
-              );
-              break;
-            }
-            // Coarse estimate: uses original (unstubbed) toolResult sizes which overstates
-            // tool-result savings; but assistant-message savings (thinking + toolCall args + text)
-            // are not counted at all, so the two errors partly cancel. Treat as a rough proxy.
-            const droppedChars = compressedEntries.reduce((total, entry) => {
-              const records = indexer.lookupToolCalls(entry.droppedOccurrenceKeys ?? entry.droppedToolCallIds);
-              return total + records.reduce((s, r) => s + r.resultText.length, 0);
-            }, 0);
-            const reclaimedTokens = Math.ceil(droppedChars / 4);
-            const ids = compressedEntries.map((e) => e.blockId).join(", ");
-            ctx.ui.notify(
-              `pruner: compacted ${compressedEntries.length} chain${compressedEntries.length === 1 ? "" : "s"} (${ids}), reclaimed ~${reclaimedTokens} tokens`,
-              "info",
-            );
+            await compactChains(ctx);
           } catch (err) {
             ctx.ui.notify(`pruner: compact failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
           }
@@ -1016,7 +970,6 @@ export function registerCommands(
           // Capture the pending queue first so we can pre-build the widget rows.
           const batches = capturePendingBatches(ctx);
           if (batches.length === 0) {
-            ctx.ui.notify("pruner: nothing pending — no batches to summarize", "info");
             // Still invoke flushPending so its finally-emitted flush-metrics entry
             // records this attempt (outcome "empty") — the incident's exact
             // undiagnosable "nothing pending" report is precisely what this log
@@ -1046,11 +999,8 @@ export function registerCommands(
 
           clearWidget();
 
-          if (!result.ok) {
-            const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, result.reason === "empty" ? "info" : "warning");
-            break;
-          }
+          // flushPending owns failure notifications for both automatic and manual calls.
+          if (!result.ok) break;
 
           if (result.reason === "skipped-oversized") {
             ctx.ui.notify(
@@ -1060,27 +1010,6 @@ export function registerCommands(
             break;
           }
 
-          if (result.reason === "skipped-trivial") {
-            ctx.ui.notify(
-              `pruner: skipped ${result.toolCallCount} trivial tool call${result.toolCallCount === 1 ? "" : "s"} — only ${result.rawCharCount} raw chars below minBatchChars=${currentConfig.value.minBatchChars}; no LLM call made; frontier advanced past this range`,
-              "info"
-            );
-            break;
-          }
-
-          if (result.reason === "skipped-deduped") {
-            const n = result.dedupedCount ?? result.toolCallCount;
-            ctx.ui.notify(
-              `pruner: deduplicated ${n} tool call${n === 1 ? "" : "s"} (${result.rawCharCount} raw chars) against earlier prunes; no LLM call made; frontier advanced past this range`,
-              "info"
-            );
-            break;
-          }
-
-          ctx.ui.notify(
-            `pruner: pruned ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} from ${result.batchCount} batch${result.batchCount === 1 ? "" : "es"} — summary ${result.summaryCharCount} chars vs ${result.rawCharCount} raw chars`,
-            "info"
-          );
           break;
         }
 
@@ -1117,7 +1046,6 @@ export function registerCommands(
 
           currentConfig.value = { ...currentConfig.value, protectedTools: nextList };
           saveConfig(currentConfig.value);
-          ctx.ui.notify(`Protected tools: ${protectedToolsDisplay(nextList)}`);
           break;
         }
 
@@ -1150,7 +1078,6 @@ export function registerCommands(
 
           currentConfig.value = { ...currentConfig.value, protectedPaths: nextList };
           saveConfig(currentConfig.value);
-          ctx.ui.notify(`Protected paths: ${protectedToolsDisplay(nextList)}`);
           break;
         }
 
@@ -1174,11 +1101,6 @@ export function registerCommands(
           }
           currentConfig.value = { ...currentConfig.value, minBatchChars: parsed };
           saveConfig(currentConfig.value);
-          ctx.ui.notify(
-            parsed === 0
-              ? "minBatchChars set to 0 — pre-flush trivial-batch skipping disabled."
-              : `minBatchChars set to ${parsed}.`,
-          );
           break;
         }
 
@@ -1197,11 +1119,6 @@ export function registerCommands(
           }
           currentConfig.value = { ...currentConfig.value, recoveryGraceTurns: parsed };
           saveConfig(currentConfig.value);
-          ctx.ui.notify(
-            parsed === 0
-              ? "recovery-grace set to 0 - structural deferral disabled; recovery text remains verbatim."
-              : `recovery-grace set to ${parsed} user-turn-group(s).`,
-          );
           break;
         }
 
@@ -1222,7 +1139,6 @@ export function registerCommands(
           const next = arg === "on" || arg === "true";
           currentConfig.value = { ...currentConfig.value, dedupByContentHash: next };
           saveConfig(currentConfig.value);
-          ctx.ui.notify(`Content-hash dedup turned ${next ? "ON" : "OFF"}.`);
           break;
         }
 
@@ -1235,6 +1151,7 @@ export function registerCommands(
         default:
           ctx.ui.notify(
             `Unknown subcommand: "${subcommand}". Run /pruner help for usage.`,
+            "warning",
           );
       }
     },

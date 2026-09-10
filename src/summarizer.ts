@@ -303,8 +303,6 @@ async function runSummarization(
         `pi-condense: summarizer model ${modelLabel(primary)} failing, using session model ${modelLabel(sessionModel)} until it recovers`,
         "warning"
       );
-    } else if (t === "recover") {
-      ctx.ui.notify(`pi-condense: summarizer model ${modelLabel(primary)} recovered`, "info");
     }
   };
 
