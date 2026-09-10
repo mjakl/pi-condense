@@ -1,4 +1,5 @@
 import type { CapturedBatch, CapturedToolCall, BatchingMode } from "./types.js";
+import { recentUserTurnsBoundary } from "./recent-user-turns.js";
 import { occKey, resultTimestampOf } from "./occurrence-key.js";
 import { isChainAnchorCustom } from "./chain-detector.js";
 
@@ -100,7 +101,8 @@ export function captureBatch(
 export function captureUnindexedBatchesFromSession(
   branch: any[],
   indexer: { isSummarized(id: string): boolean },
-  exclude: (toolName: string, args: unknown) => boolean = () => false
+  exclude: (toolName: string, args: unknown) => boolean = () => false,
+  keepRecentUserTurns = 0,
 ): CapturedBatch[] {
   // Keep the SessionEntry wrapper alongside each projected message so the
   // entry's own timestamp remains available as the preferred source below
@@ -108,7 +110,8 @@ export function captureUnindexedBatchesFromSession(
   const projected = branch
     .filter(isProjectableEntry)
     .map((e: any) => ({ entry: e, msg: e.type === "custom_message" ? projectCustomMessageEntry(e) : e.message }));
-  const msgs = projected.map((p) => p.msg);
+  const allMessages = projected.map((p) => p.msg);
+  const msgs = allMessages.slice(0, recentUserTurnsBoundary(allMessages, keepRecentUserTurns));
 
   const batches: CapturedBatch[] = [];
   // turnCounter increments for EVERY assistant message (not just prunable ones).

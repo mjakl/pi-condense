@@ -9,9 +9,12 @@ import extension from "../index.ts";
 const dir = mkdtempSync(join(process.cwd(), ".lifecycle-"));
 process.env.PI_CODING_AGENT_DIR = dir;
 process.env.PI_OFFLINE = "1";
-const budget = process.argv.includes("budget");
+const budget = process.argv.includes("budget") || process.argv.includes("recent-budget");
+const recent = process.argv.some(arg => arg.startsWith("recent-"));
 writeFileSync(join(dir, "settings.json"), JSON.stringify({ contextPrune: {
-  enabled: true, pruneOn: "agent-message", minBatchChars: 1, dedupByContentHash: false,
+  enabled: true, pruneOn: "agent-message", minBatchChars: 1, dedupByContentHash: recent,
+  keepRecentUserTurns: recent ? 1 : 0,
+  spillThreshold: recent ? 1 : 65536,
   summarizerModel: "default", batchingMode: "agent-message", autoBudgetThreshold: budget ? 0.5 : null,
   chainCompression: { enabled: false },
 } }));
@@ -69,6 +72,28 @@ try {
   };
   const sm = SessionManager.create(dir, join(dir, "sessions"));
   let session = await create(sm);
+  if (recent) {
+    await session.prompt("Use fixture then finish.");
+    assert.equal(summaries, 0, "current interaction must not summarize even under pressure");
+    assert.ok(JSON.stringify(payloads.at(-1)).includes("raw fact raw fact"));
+    assert.ok(!sm.getBranch().some((e: any) => ["context-prune-index", "context-prune-frontier", "context-prune-dedup-alias", "context-prune-chain"].includes(e.customType)), "protected work must not advance the frontier or create archives");
+    const file = sm.getSessionFile()!;
+    session.dispose();
+    session = await create(SessionManager.open(file));
+    await session.prompt("Use fixture then finish.");
+    assert.equal(summaries, 1, "reload rescan must summarize the newly eligible first interaction");
+    const latest = JSON.stringify(payloads.at(-1));
+    assert.ok(latest.includes("raw fact raw fact"), "current results stay raw");
+    const entries = SessionManager.open(file).getBranch();
+    const records = entries.filter((e: any) => e.customType === "context-prune-index").flatMap((e: any) => e.data.toolCalls);
+    assert.deepEqual(records.map((r: any) => r.toolCallId), ["call-1", "call-2"], "only the older interaction is archived");
+    await session.prompt("Use fixture then finish.");
+    assert.equal(summaries, 1, "identical older outputs dedup after aging out");
+    assert.ok(JSON.stringify(payloads.at(-1)).includes("raw fact raw fact"), "dedup must not rewrite current results");
+    assert.ok(sm.getSessionFile());
+    session.dispose();
+    console.log(JSON.stringify({ recent: true, budget, calls, summaries, reload: true }));
+  } else {
   for (let run = 1; run <= 2; run++) {
     await session.prompt("Use fixture then finish.");
     const expectedSummaries = run * (budget ? 2 : 1);
@@ -119,6 +144,7 @@ try {
   assert.ok(SessionManager.open(file).getEntries().some((e: any) => e.message?.role === "toolResult" && JSON.stringify(e.message.content).includes("raw fact raw fact")), "compaction leaves original session history intact");
   session.dispose();
   console.log(JSON.stringify(report));
+  }
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

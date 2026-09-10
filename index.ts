@@ -198,10 +198,11 @@ export default function (pi: ExtensionAPI) {
     try {
       const branch = ctx.sessionManager.getBranch();
       observeSummaries(projectBranchMessages(branch));
-      batches = captureUnindexedBatchesFromSession(branch, indexer, protectionPredicate);
+      batches = captureUnindexedBatchesFromSession(branch, indexer, protectionPredicate, currentConfig.value.keepRecentUserTurns);
     } catch (err) {
       if (opts?.rethrow) throw err;
-      batches = pendingBatches.slice();
+      // Without a branch we cannot establish the protected boundary.
+      batches = currentConfig.value.keepRecentUserTurns > 0 ? [] : pendingBatches.slice();
     }
     batches = batches
       .map((batch) => trimBatchToPendingRange(batch))
@@ -298,9 +299,11 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Use pre-captured batches if provided (avoids double-capture when the
-      // caller previewed the queue before opening the progress overlay).
-      batches = options.previewedBatches ?? capturePendingBatches(ctx);
+      // Recheck the boundary after a settings change or branch switch; an old
+      // preview must never authorize rewriting newly protected interactions.
+      batches = currentConfig.value.keepRecentUserTurns > 0
+        ? capturePendingBatches(ctx)
+        : options.previewedBatches ?? capturePendingBatches(ctx);
       capturedBatches = batches.length;
 
       if (batches.length === 0) {
@@ -674,6 +677,7 @@ export default function (pi: ExtensionAPI) {
               now: () => Date.now(),
               fuseRange: makeFuseRange(ctx, onUsage),
               messages: detectionMessages,
+              keepRecentUserTurns: currentConfig.value.keepRecentUserTurns,
               diagnostics,
               backfill: {
                 spillThreshold: currentConfig.value.spillThreshold,
@@ -843,7 +847,11 @@ export default function (pi: ExtensionAPI) {
     if (!hasToolResults && !rearmedPending) return;
 
     let pushedBatch = false;
-    if (hasToolResults) {
+    if (hasToolResults && currentConfig.value.keepRecentUserTurns > 0) {
+      const eligible = capturePendingBatches(ctx);
+      pendingBatches.splice(0, pendingBatches.length, ...eligible);
+      pushedBatch = eligible.length > 0;
+    } else if (hasToolResults) {
       const capturedBatch = captureBatch(
         event.message,
         event.toolResults,
@@ -946,6 +954,7 @@ export default function (pi: ExtensionAPI) {
       currentConfig.value.recoveryGraceTurns,
       diagnostics,
       { state: supersede, isProtected: protectionPredicate },
+      currentConfig.value.keepRecentUserTurns,
     );
     if (result.pruned) {
       messages = result.messages;
@@ -974,6 +983,7 @@ export default function (pi: ExtensionAPI) {
         now: () => Date.now(),
         fuseRange: makeFuseRange(ctx, (usage) => statsAccum.add(usage)),
         messages: branchMessages,
+        keepRecentUserTurns: currentConfig.value.keepRecentUserTurns,
         diagnostics,
         backfill: {
           spillThreshold: currentConfig.value.spillThreshold,
