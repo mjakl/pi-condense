@@ -179,9 +179,10 @@ Settings live under `contextPrune` in `<agent-dir>/settings.json` (`$PI_CODING_A
 | Key | Default | Notes |
 |---|---|---|
 | `enabled` | `false` | Master switch (or just use `/pruner on`) |
+| `keepRecentUserTurns` | `0` | Nonnegative integer. Preserve the latest N user interactions, including the current one, from every condense rewrite. Pressure and `/pruner compact` cannot override it; native Pi compaction is excluded. |
 | `summarizerModel` | `"default"` | Pin a cheap model instead of reusing your active one - see the plan-by-plan table in [doc/configuration.md](doc/configuration.md#choosing-a-summarizer-model) |
 | `pruneOn` | `agent-message` | Trigger mode - see Architecture above |
-| `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes everything regardless of `pruneOn`; the trigger point is capped at 300k tokens |
+| `autoBudgetThreshold` | `null` | Fraction (e.g. `0.8`) of the context window that force-flushes eligible batches regardless of `pruneOn`; the trigger point is capped at 300k tokens |
 | `frontierGapThresholdTokens` | `null` | Opt-in absolute-token flush trigger: fires at `turn_end` once the un-pruned tail past the prune frontier reaches N tokens, regardless of window size; recommended starting value `80000` |
 | `protectedTools` / `protectedPaths` | `[]` / `["**/skills/**/*.md", "**/gauntlet-overrides.md"]` | Tool names / path globs that are never summarized; older successful `read` results may be stubbed only when a later read of the same path has identical text-only output. Distinct pages, changed content, and failed reads stay verbatim. See [supersession](PRUNING.md#protected-tools--paths). |
 | `spillThreshold` | `65536` | Sidecar threshold for missing archives of summary-covered chains; new results are not eagerly spilled |
