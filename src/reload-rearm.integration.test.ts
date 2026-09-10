@@ -286,6 +286,28 @@ function bootExtension(
   return { handlers, commands, notifications, ctx, pi, piAppended, sessionAppended, appended, branch };
 }
 
+describe("errors-only notifications", () => {
+  it("changes settings silently and retains explicit status output", async () => {
+    const h = await boot({ branch: [] });
+    for (const args of ["off", "on", "model default", "thinking off", "batching turn", "prune-on on-demand", "protected-tools read", "protected-paths *.md", "min-batch-chars 100", "recovery-grace 0", "dedup off"]) {
+      await h.commands.get("pruner")!(args, h.ctx);
+    }
+    expect(h.notifications).toEqual([]);
+    await h.commands.get("pruner")!("status", h.ctx);
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0]).toContain("thinking: Off (off)");
+    expect(h.notifications[0]).toContain("dedup:    off");
+  });
+
+  it("keeps an empty tree and dismissed selectors silent", async () => {
+    const h = await boot({ branch: [] });
+    for (const args of ["tree", "batching", "prune-on"]) {
+      await h.commands.get("pruner")!(args, h.ctx);
+    }
+    expect(h.notifications).toEqual([]);
+  });
+});
+
 async function boot(options?: Parameters<typeof bootExtension>[0]) {
   const harness = bootExtension(options);
   const extension = (await import("../index.js")).default;
@@ -680,7 +702,7 @@ describe("reload rearm (issue #6)", () => {
     await handlers.get("session_tree")!({}, ctx);
     expectMinimalStatus();
     await handlers.get("turn_end")!({ message: branch[1].message, toolResults: [branch[2].message] }, ctx);
-    expect(notifications).toContain("pruner: 1 turn queued — will summarize on agent's next text response");
+    expect(notifications).toEqual([]);
     expectMinimalStatus();
 
     const callsBefore = summarizerCalls;
@@ -1132,7 +1154,7 @@ describe("reload rearm (issue #6)", () => {
     expect(fm.trigger).toBe("frontier-gap");
     expect(fm.metrics.frontierGapTokens).toBeGreaterThanOrEqual(10);
 
-    expect(notifications.some((n) => n.includes("un-pruned tail exceeded frontier gap threshold"))).toBe(true);
+    expect(notifications).toEqual([]);
   });
 
   it("budget trigger takes precedence over frontier-gap when both conditions are met at turn_end (#13)", async () => {

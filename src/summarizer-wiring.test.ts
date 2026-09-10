@@ -617,10 +617,13 @@ describe("bounded primary retries", () => {
     expect(seen.filter((id) => id === SESSION.id)).toHaveLength(2);
     expect(delays).toEqual([]);
     now += COOLDOWN_MS;
+    const recoveryNotes: Note[] = [];
+    ctx.ui.notify = (msg: string, level: string) => recoveryNotes.push({ msg, level });
     seen.length = 0;
     streamImpl = (model) => { seen.push(model.id); return okStream("primary recovered"); };
     await summarizeBatch(makeBatch(), distinctConfig, ctx, { controller });
     expect(seen).toEqual([PRIMARY.id]);
     expect(controller.inFallback).toBe(false);
+    expect(recoveryNotes).toEqual([]);
   });
 });

@@ -10,6 +10,7 @@ import { DEFAULT_CONFIG, STATUS_WIDGET_ID } from "./types.js";
 function setupPrunerCommand(overrides: {
   capturePendingBatches?: () => any[];
   flushPending?: (ctx: any, options?: any) => Promise<any>;
+  compactChains?: () => Promise<any>;
   getRearmed?: () => boolean;
   getContextMetrics?: (ctx: any) => ContextMetricsSnapshot;
 } = {}) {
@@ -40,13 +41,14 @@ function setupPrunerCommand(overrides: {
     overrides.capturePendingBatches ?? (() => []),
     () => ({ callCount: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCost: 0 } as SummarizerStats),
     {} as any,
-    async () => ({ compressedEntries: [], skipped: 0 }),
+    overrides.compactChains ?? (async () => ({ compressedEntries: [], skipped: 0 })),
     overrides.getContextMetrics,
     overrides.getRearmed,
   );
 
   const ctx: any = {
     ui: {
+      setWidget: mock(),
       notify(message: string, type?: string) {
         notifications.push({ message, type });
       },
@@ -67,8 +69,62 @@ describe("/pruner now (empty capture)", () => {
 
     expect(harness.flushCalls.length).toBe(1);
     expect(harness.flushCalls[0]).toMatchObject({ previewedBatches: [], trigger: "manual" });
-    expect(harness.notifications[0]?.message).toBe("pruner: nothing pending — no batches to summarize");
+    expect(harness.notifications).toEqual([]);
   });
+});
+
+describe("notification policy", () => {
+  for (const reason of ["flushed", "skipped-trivial", "skipped-deduped", "empty", "already-flushing", "aborted", "stale-context"]) {
+    it(`keeps manual ${reason} silent`, async () => {
+      const harness = setupPrunerCommand({
+        capturePendingBatches: () => [{ toolCalls: [] }],
+        flushPending: async () => ({ ok: ["flushed", "skipped-trivial", "skipped-deduped"].includes(reason), reason }),
+      });
+      await harness.run("now");
+      expect(harness.notifications).toEqual([]);
+    });
+  }
+
+  for (const reason of ["failed", "summarizer-failed", "skipped-oversized"]) {
+    it(`retains manual ${reason} warnings`, async () => {
+      const harness = setupPrunerCommand({
+        capturePendingBatches: () => [{ toolCalls: [] }],
+        flushPending: async () => ({ ok: reason === "skipped-oversized", reason }),
+      });
+      await harness.run("now");
+      expect(harness.notifications).toHaveLength(1);
+      expect(harness.notifications[0].type).toBe("warning");
+    });
+  }
+
+  it("keeps compact success and no eligible chains silent, but reports failures", async () => {
+    for (const compressedEntries of [[], [{ blockId: "b1" }]]) {
+      const harness = setupPrunerCommand({ compactChains: async () => ({ compressedEntries, skipped: 0 }) });
+      await harness.run("compact");
+      expect(harness.notifications).toEqual([]);
+    }
+    const harness = setupPrunerCommand({ compactChains: async () => { throw new Error("disk full"); } });
+    await harness.run("compact");
+    expect(harness.notifications).toEqual([{ message: "pruner: compact failed: disk full", type: "warning" }]);
+  });
+
+  for (const command of ["help", "stats", "model", "thinking", "min-batch-chars", "recovery-grace", "dedup status"]) {
+    it(`preserves requested ${command} output`, async () => {
+      const harness = setupPrunerCommand();
+      await harness.run(command);
+      expect(harness.notifications).toHaveLength(1);
+      expect(harness.notifications[0].message.length).toBeGreaterThan(0);
+    });
+  }
+
+  for (const command of ["unknown", "thinking invalid", "batching invalid", "dedup invalid", "min-batch-chars -1", "recovery-grace -1"]) {
+    it(`warns for invalid command ${command}`, async () => {
+      const harness = setupPrunerCommand();
+      await harness.run(command);
+      expect(harness.notifications).toHaveLength(1);
+      expect(harness.notifications[0].type).toBe("warning");
+    });
+  }
 });
 
 describe("/pruner status context block", () => {
