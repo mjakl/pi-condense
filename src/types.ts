@@ -270,6 +270,8 @@ export interface ContextPruneConfig {
   summarizerModel: string;
   /** Thinking/reasoning level to request for summarizer calls. */
   summarizerThinking: SummarizerThinking;
+  /** Maximum automatic batch jobs in flight, including retries and fallback. */
+  summarizerConcurrency: number;
   /** When to trigger summarization and pruning */
   pruneOn: PruneOn;
   /**
@@ -549,6 +551,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   showPruneStatusLine: true,
   summarizerModel: "default",
   summarizerThinking: "default",
+  summarizerConcurrency: 2,
   pruneOn: "agent-message",
   batchingMode: "turn",
   quietOversizedSkips: false,

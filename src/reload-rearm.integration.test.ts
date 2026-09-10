@@ -357,6 +357,89 @@ async function boot(options?: Parameters<typeof bootExtension>[0]) {
   return harness;
 }
 
+describe("bounded flush publication", () => {
+  it("keeps manual progress-driven flushes serial", async () => {
+    const previous = streamImpl;
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let started = 0;
+    streamImpl = () => {
+      started++;
+      return { async *[Symbol.asyncIterator]() { await hold; }, async result() { return okStream().result(); } };
+    };
+    let work: Promise<unknown> | undefined;
+    try {
+      const branch = Array.from({ length: 3 }, (_, i) => pendingBatchEntries(`manual-${i}`, "x".repeat(400), 100 + i * 2000)).flat();
+      const h = await boot({ branch });
+      await h.handlers.get("session_start")!({}, h.ctx);
+      work = h.commands.get("pruner")!("now", h.ctx);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(started).toBe(1);
+      release();
+      await work;
+      expect(started).toBe(3);
+      expect(h.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(3);
+    } finally {
+      release();
+      await work;
+      streamImpl = previous;
+    }
+  });
+
+  for (const failSecond of [false, true]) {
+    it(`waits for all workers and publishes only the ordered completed prefix (failure=${failSecond})`, async () => {
+      const previous = streamImpl;
+      const releases: (() => void)[] = [];
+      const waits = Array.from({ length: 4 }, () => new Promise<void>((resolve) => releases.push(resolve)));
+      const started: number[] = [];
+      const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+      streamImpl = (_model, input) => {
+        const index = Number(input.messages[0].content[0].text.match(/queued-(\d+)/)[1]);
+        started.push(index);
+        return {
+          async *[Symbol.asyncIterator]() { await waits[index]; },
+          async result() { return (index === 1 && failSecond ? errStream("down") : okStream()).result(); },
+        };
+      };
+      let work: Promise<unknown> | undefined;
+      try {
+        const branch = Array.from({ length: 4 }, (_, i) => pendingBatchEntries(`queued-${i}`, `queued-${i}:` + "x".repeat(400), 100 + i * 2000)).flat();
+        const h = await boot({ branch });
+        await h.handlers.get("session_start")!({}, h.ctx);
+        const finish = { message: { role: "assistant", content: [{ type: "text", text: "done" }] } };
+        work = h.handlers.get("message_end")!(finish, h.ctx);
+        await tick();
+        expect(started).toEqual([0, 1]);
+        // The flush guard prevents a second automatic invocation starting work.
+        await h.handlers.get("message_end")!(finish, h.ctx);
+        expect(started).toEqual([0, 1]);
+        for (const index of [1, 2, 3]) {
+          releases[index]();
+          await tick();
+        }
+        expect(started).toEqual([0, 1, 2, 3]);
+        expect(h.appended.filter(e => ["context-prune-summary", "context-prune-index", "context-prune-frontier", "context-prune-stats"].includes(e.type))).toHaveLength(0);
+        releases[0]();
+        await work;
+        const count = failSecond ? 1 : 4;
+        expect(h.appended.filter(e => e.type === "context-prune-summary")).toHaveLength(count);
+        expect(h.appended.filter(e => e.type === "context-prune-index")).toHaveLength(count);
+        const frontier = h.appended.filter(e => e.type === "context-prune-frontier").at(-1)!.data as any;
+        expect(frontier.lastAttemptedToolCallId).toBe(`queued-${count - 1}`);
+        const stats = h.appended.filter(e => e.type === "context-prune-stats").at(-1)!.data as any;
+        expect(stats.totalInputTokens).toBe(4);
+        const rendered = await h.handlers.get("context")!({ messages: branch.filter(e => e.type === "message").map(e => e.message) }, h.ctx);
+        const retained = rendered.messages.filter((m: any) => m.role === "toolResult" && m.content[0].text.includes("x".repeat(400)));
+        expect(retained).toHaveLength(failSecond ? 3 : 0);
+      } finally {
+        releases.forEach(release => release());
+        await work;
+        streamImpl = previous;
+      }
+    });
+  }
+});
+
 describe("full-result quality", () => {
   it("a rejected summary retains originals, advances the frontier once, and is not re-billed after reload", async () => {
     const previous = streamImpl;

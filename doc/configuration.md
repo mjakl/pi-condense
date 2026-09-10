@@ -16,6 +16,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
     "showPruneStatusLine": true,
     "summarizerModel": "default",
     "summarizerThinking": "default",
+    "summarizerConcurrency": 2,
     "summarizerIdleTimeoutMs": 20000,
     "summarizerMaxTimeoutMs": 180000,
     "pruneOn": "agent-message",
@@ -49,6 +50,7 @@ Settings live under the `contextPrune` key in `<agent-dir>/settings.json` (i.e. 
 | `showPruneStatusLine` | `true` / `false` | `true` | Footer widget + queued-turn notifications |
 | `summarizerModel` | `"default"` or `"provider/model-id"` | `"default"` | `default` = your active pi model. See [Choosing a summarizer model](#choosing-a-summarizer-model) |
 | `summarizerThinking` | `default`/`off`/`minimal`/`low`/`medium`/`high`/`xhigh` | `default` | Provider-specific reasoning effort knob |
+| `summarizerConcurrency` | integer >= 1 | `2` | Maximum automatic batch jobs in flight per extension session, including retry waits and fallback. Fractions >= 1 are floored; invalid values or values below 1 reset to 2. No upper bound beyond available batches. Config-file-only, no settings row. `1` serializes automatic batches; manual progress-driven flushes always stay serial. |
 | `pruneOn` | `agent-message` / `on-demand` | `agent-message` | Trigger mode - see README Architecture section |
 | `batchingMode` | `turn` / `agent-message` | `turn` | How coarse each summary is (independent of `pruneOn`) |
 | `quietOversizedSkips` | `true` / `false` | `false` | Silences trivial/dedup info notifications; rejected summaries always warn |
@@ -123,6 +125,12 @@ Set it from the slash command (saves immediately):
 /pruner model openai/gpt-4.1-mini:low
 ```
 
+### Summary concurrency
+
+Automatic flushes run at most `summarizerConcurrency` batch jobs at once (default `2`). Each job holds its slot through primary retries, backoff, and session-model fallback. A free slot takes the next batch; results are still published in input order after all jobs settle. This limits work within one extension session, not across Pi processes or other provider clients. More queued batches can increase flush latency; flush triggers, final-reply publication timing, and batch granularity are unchanged.
+
+Set `contextPrune.summarizerConcurrency` in `<agent-dir>/settings.json`, then restart Pi or use `/reload`. No edit is needed for the default of 2. Cancellation, where the caller supplies a signal, stops queued dispatch and waits for started work to settle. Automatic lifecycle events do not gain a new cancellation mechanism.
+
 ### Summarizer timeouts
 
 Every summarizer call is bounded by two independent timers, so a stalled
@@ -146,7 +154,7 @@ Both timers can be set to `0` to disable them independently.
 | Command | Effect |
 |---|---|
 | `/pruner` | Interactive picker over all subcommands |
-| `/pruner settings` | Settings overlay (toggle / cycle every option) |
+| `/pruner settings` | Settings overlay (toggle / cycle UI-exposed options; file-only keys are listed above) |
 | `/pruner on` / `off` | Enable / disable pruning |
 | `/pruner status` | Show mode, model, trigger, cumulative stats, and a `--- context ---` block (see below) |
 | `/pruner stats` | Detailed cumulative summarizer token/cost stats |

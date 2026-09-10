@@ -50,6 +50,12 @@ function normalize(existing: Partial<ContextPruneConfig>): ContextPruneConfig {
     summarizerThinking: isSummarizerThinking(merged.summarizerThinking)
       ? merged.summarizerThinking
       : DEFAULT_CONFIG.summarizerThinking,
+    summarizerConcurrency:
+      typeof merged.summarizerConcurrency === "number" &&
+      Number.isFinite(merged.summarizerConcurrency) &&
+      merged.summarizerConcurrency >= 1
+        ? Math.floor(merged.summarizerConcurrency)
+        : DEFAULT_CONFIG.summarizerConcurrency,
     quietOversizedSkips:
       typeof merged.quietOversizedSkips === "boolean"
         ? merged.quietOversizedSkips

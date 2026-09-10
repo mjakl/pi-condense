@@ -101,6 +101,35 @@ describe("loadConfig recoveryGraceTurns normalization", () => {
   });
 });
 
+describe("loadConfig summarizerConcurrency normalization", () => {
+  it("defaults to two when unset", async () => {
+    await writeContextPrune({});
+    expect((await loadConfig()).summarizerConcurrency).toBe(2);
+  });
+
+  for (const value of [1, 3, 100]) {
+    it(`preserves ${value} through load/save`, async () => {
+      await writeContextPrune({ summarizerConcurrency: value });
+      const config = await loadConfig();
+      expect(config.summarizerConcurrency).toBe(value);
+      await saveConfig(config);
+      expect((await loadConfig()).summarizerConcurrency).toBe(value);
+    });
+  }
+
+  for (const value of [0, 0.9, -1, "3", true, null, NaN, Infinity, -Infinity]) {
+    it(`defaults invalid value ${String(value)} to two`, async () => {
+      await writeContextPrune({ summarizerConcurrency: value });
+      expect((await loadConfig()).summarizerConcurrency).toBe(2);
+    });
+  }
+
+  it("floors a valid fraction without allowing zero workers", async () => {
+    await writeContextPrune({ summarizerConcurrency: 1.9 });
+    expect((await loadConfig()).summarizerConcurrency).toBe(1);
+  });
+});
+
 describe("loadConfig summarizer timeout normalization", () => {
   it("defaults both timeouts when absent", async () => {
     await writeContextPrune({});

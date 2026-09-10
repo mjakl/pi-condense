@@ -211,8 +211,8 @@ export default function (pi: ExtensionAPI) {
 
   // Summarizes + indexes all pending batches.
   // When options.onProgress is provided batches are processed sequentially
-  // (one LLM call each) so the caller can update per-row UI. Otherwise all
-  // batches are summarized in parallel (one summarizeBatches call).
+  // (one LLM call each) so the caller can update per-row UI. Otherwise batches
+  // use bounded parallel jobs (one summarizeBatches call).
   // Session delivery binds metadata writes before async automatic flushes.
   // Summaries always use Pi's non-turn delivery for live state and persistence.
   // Range-summary fuser injected into compressEligible (B). Returns undefined
@@ -443,8 +443,8 @@ export default function (pi: ExtensionAPI) {
         }
       } else {
         // Mark all trivial + fully-deduped slots up front, then call
-        // summarizeBatches with only the remaining batches (parallel — one
-        // LLM call each).
+        // summarizeBatches with only the remaining batches (bounded parallel
+        // jobs, one batch each).
         for (let i = 0; i < batches.length; i++) {
           if (isFullyDeduped[i]) results[i] = "deduped";
           else if (isTrivial[i]) results[i] = "trivial";
