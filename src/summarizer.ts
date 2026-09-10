@@ -382,15 +382,10 @@ export async function summarizeRange(
 }
 
 /**
- * Summarizes multiple captured batches — one LLM call per batch, run in parallel.
- *
- * Returns one classified outcome per batch, index-aligned with `batches`.
- *
- * Rationale for parallel-per-batch instead of a single merged call:
- *   • Each batch becomes its own summary message (one per turn), so they can be
- *     rendered, browsed, and recovered independently via context_tree_query.
- *   • Parallel calls give similar end-to-end latency to a single merged call while
- *     keeping the summaries strictly separated.
+ * Bounded parallel batch jobs, each holding a slot through retries and fallback.
+ * Returns outcomes in input order after all started work settles, preserving
+ * the caller's publication barrier and one independently recoverable summary
+ * per batch. The extension's flush guard prevents overlapping invocations.
  */
 export async function summarizeBatches(
   batches: CapturedBatch[],
@@ -398,32 +393,32 @@ export async function summarizeBatches(
   ctx: ExtensionContext,
   options: SummarizeBatchesOptions = {}
 ): Promise<SummarizeOutcome[]> {
-  if (batches.length === 0) return [];
-  // Single batch — delegate to the single-batch path (no extra overhead)
-  if (batches.length === 1) {
-    return [
-      await summarizeBatch(batches[0], config, ctx, {
-        signal: options.signal,
-        controller: options.controller,
-        onUsage: options.onUsage,
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
-        },
-      }),
-    ];
-  }
+  const results: SummarizeOutcome[] = new Array(batches.length);
+  let nextIndex = 0;
+  let failure: { error: unknown } | undefined;
 
-  // Multiple batches — run in parallel; each produces its own SummarizeResult
-  return Promise.all(
-    batches.map((batch, index) =>
-      summarizeBatch(batch, config, ctx, {
-        signal: options.signal,
-        controller: options.controller,
-        onUsage: options.onUsage,
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
-        },
-      })
-    )
-  );
+  const worker = async () => {
+    try {
+      while (!failure && nextIndex < batches.length) {
+        options.signal?.throwIfAborted();
+        const index = nextIndex++;
+        const batch = batches[index];
+        results[index] = await summarizeBatch(batch, config, ctx, {
+          signal: options.signal,
+          controller: options.controller,
+          onUsage: options.onUsage,
+          onTextProgress: (receivedChars) => {
+            options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
+          },
+        });
+      }
+    } catch (error) {
+      // Do not release the flush guard while sibling work can still bill usage.
+      failure ??= { error };
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(config.summarizerConcurrency, batches.length) }, worker));
+  if (failure) throw failure.error;
+  return results;
 }

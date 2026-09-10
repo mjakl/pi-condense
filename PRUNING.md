@@ -586,7 +586,7 @@ captured batches (from turn_end or session scan)
   │     batches whose remaining raw chars < threshold → skip; no LLM call;
   │     leave originals in context; advance frontier
   │
-  ├─ 6. Summarizer LLM call           (parallel: one call per batch)
+  ├─ 6. Summarizer LLM call           (bounded parallel: default 2 batch jobs)
   │     resolveModel + summarizeBatch / summarizeBatches
   │
   └─ 7. Oversized post-check          (decorated summary > raw? retain verbatim; frontier advances)

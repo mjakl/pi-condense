@@ -9,6 +9,8 @@ publishes via OIDC trusted publishing. See `.agents/skills/release/SKILL.md`.
 
 ## [Unreleased]
 
+- Limit automatic batch summarization to 2 concurrent jobs per extension session by default. Configure file-only `contextPrune.summarizerConcurrency` (finite number >= 1, fractions floored; invalid values reset to 2). Jobs retain their slots through retry waits and fallback. Preserve ordered results, the all-results publication barrier, and serial manual progress. Cancellation stops queued dispatch; thrown errors wait for started work to settle before returning control to the flush. No global provider quota or background preparation.
+
 - Report session-appender and frontier-persistence failures from automatic and manual flushes. Flush failures are notified at their source; manual commands no longer repeat errors already reported. Stale-context and cancellation outcomes remain silent.
 
 - Notify only about failures and actionable problems, except for explicitly requested command output (`status`, `stats`, `help`, and setting queries). Remove queue/auto-flush notices, success confirmations, trivial/dedup skips, empty-work notices, ordinary cancellation notices, and summarizer recovery notices. Keep outage/fallback, rejection, timeout, and invalid-input warnings, plus existing non-notification UI. The legacy `quietOversizedSkips` setting is now ignored and removed from the settings UI.

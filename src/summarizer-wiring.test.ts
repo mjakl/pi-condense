@@ -33,7 +33,7 @@ mock.module("@earendil-works/pi-ai/compat", () => ({
   streamSimple: (...args: any[]) => streamImpl(...args),
 }));
 
-const { summarizeBatch, summarizeRange } = await import("./summarizer.js");
+const { summarizeBatch, summarizeRange, summarizeBatches } = await import("./summarizer.js");
 const { FallbackController, COOLDOWN_MS } = await import("./summarizer-fallback.js");
 const { DEFAULT_CONFIG } = await import("./types.js");
 
@@ -155,6 +155,217 @@ function makeBatch() {
 const distinctConfig = { ...DEFAULT_CONFIG, summarizerModel: "provider-a/primary-model" };
 
 const text = (outcome: any) => (outcome.kind === "ok" ? outcome.result.summaryText : undefined);
+
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+// Drain async auth/stream continuations without wall-clock timing assumptions.
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+const batches = (count: number) => Array.from({ length: count }, (_, index) => ({
+  ...makeBatch(), assistantText: `batch-${index}`, turnIndex: index,
+}));
+const batchIndex = (input: any) => Number(input.messages[0].content[0].text.match(/batch-(\d+)/)[1]);
+
+function gatedStream(wait: Promise<void>, summary: string) {
+  return {
+    async *[Symbol.asyncIterator]() { await wait; },
+    async result() { return { stopReason: "stop", content: [{ type: "text", text: summary }], usage: USAGE }; },
+  };
+}
+
+describe("bounded automatic batch summarization", () => {
+  it("defaults to two slots, refills on completion, and returns ordered results and progress indices", async () => {
+    const gates = Array.from({ length: 5 }, gate);
+    const started: number[] = [];
+    const progress: number[][] = [];
+    let charged = 0;
+    streamImpl = (_model, input) => {
+      const index = batchIndex(input);
+      started.push(index);
+      return gatedStream(gates[index].promise, `summary-${index}`);
+    };
+    const work = summarizeBatches(batches(5), DEFAULT_CONFIG, makeCtx([]), {
+      onUsage: () => charged++,
+      onBatchTextProgress: (index, total, batch) => progress.push([index, total, batch.turnIndex]),
+    });
+    try {
+      await tick();
+      expect(started).toEqual([0, 1]);
+      gates[1].release();
+      await tick();
+      expect(started).toEqual([0, 1, 2]);
+      gates[2].release();
+      await tick();
+      expect(started).toEqual([0, 1, 2, 3]);
+      gates[0].release();
+      await tick();
+      expect(started).toEqual([0, 1, 2, 3, 4]);
+    } finally {
+      gates.forEach((g) => g.release());
+      await work;
+    }
+    expect((await work).map(text)).toEqual([0, 1, 2, 3, 4].map((i) => `summary-${i}`));
+    expect(charged).toBe(5);
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress.every(([index, total, turn]) => total === 5 && index === turn)).toBe(true);
+  });
+
+  for (const limit of [1, 3, 20]) {
+    it(`honors configured concurrency ${limit}, bounded by batch count`, async () => {
+      const hold = gate();
+      let started = 0;
+      streamImpl = () => { started++; return gatedStream(hold.promise, "summary"); };
+      const work = summarizeBatches(batches(4), { ...DEFAULT_CONFIG, summarizerConcurrency: limit }, makeCtx([]));
+      try {
+        await tick();
+        expect(started).toBe(Math.min(limit, 4));
+      } finally {
+        hold.release();
+        await work;
+      }
+      expect(started).toBe(4);
+    });
+  }
+
+  it("does not share slots between independent extension invocations", async () => {
+    const hold = gate();
+    let started = 0;
+    streamImpl = () => { started++; return gatedStream(hold.promise, "summary"); };
+    const work = Promise.all([makeCtx([]), makeCtx([])].map((ctx) => summarizeBatches(batches(3), DEFAULT_CONFIG, ctx)));
+    try {
+      await tick();
+      expect(started).toBe(4);
+    } finally {
+      hold.release();
+      await work;
+    }
+  });
+
+  it("returns empty and single-batch results without changing their shape", async () => {
+    streamImpl = () => okStream("one");
+    expect(await summarizeBatches([], DEFAULT_CONFIG, makeCtx([]))).toEqual([]);
+    expect((await summarizeBatches(batches(1), DEFAULT_CONFIG, makeCtx([]))).map(text)).toEqual(["one"]);
+  });
+
+  it("does not dispatch an already-cancelled queue", async () => {
+    let started = 0;
+    streamImpl = () => { started++; return okStream("unexpected"); };
+    const abort = new AbortController();
+    abort.abort();
+    await expect(summarizeBatches(batches(4), DEFAULT_CONFIG, makeCtx([]), { signal: abort.signal })).rejects.toThrow();
+    expect(started).toBe(0);
+  });
+
+  it("stops dispatch on cancellation and waits for every started worker before rejecting", async () => {
+    const hold = gate();
+    const abort = new AbortController();
+    const started: number[] = [];
+    streamImpl = (_model, input, opts) => {
+      const index = batchIndex(input);
+      started.push(index);
+      return index === 0 ? hangingStream(opts) : gatedStream(hold.promise, "late");
+    };
+    let settled = false;
+    const work = summarizeBatches(batches(4), DEFAULT_CONFIG, makeCtx([]), { signal: abort.signal })
+      .then(() => { settled = true; return null; }, (error) => { settled = true; return error; });
+    try {
+      await tick();
+      abort.abort();
+      await tick();
+      expect(started).toEqual([0, 1]);
+      expect(settled).toBe(false);
+    } finally {
+      hold.release();
+      await work;
+    }
+    expect(await work).toBeInstanceOf(Error);
+    expect(started).toEqual([0, 1]);
+  });
+
+  it("stops dispatch after a thrown UI error but settles owned work and usage", async () => {
+    const hold = gate();
+    const failure = new Error("stale context");
+    const ctx = makeCtx([]);
+    ctx.ui.notify = () => { throw failure; };
+    const started: number[] = [];
+    let charged = 0;
+    streamImpl = (_model, input) => {
+      const index = batchIndex(input);
+      started.push(index);
+      return index === 0 ? errStream("down") : gatedStream(hold.promise, "late");
+    };
+    let settled = false;
+    const work = summarizeBatches(batches(4), DEFAULT_CONFIG, ctx, { onUsage: () => charged++ })
+      .then(() => { settled = true; return null; }, (error) => { settled = true; return error; });
+    try {
+      await tick();
+      expect(settled).toBe(false);
+      expect(started).toEqual([0, 1]);
+    } finally {
+      hold.release();
+      await work;
+    }
+    expect(await work).toBe(failure);
+    expect(charged).toBe(2);
+    expect(started).toEqual([0, 1]);
+  });
+
+  it("keeps the slot through all primary backoffs and fallback, then dispatches the next batch", async () => {
+    const retryGates = Array.from({ length: 3 }, gate);
+    const fallbackGate = gate();
+    const seen: string[] = [];
+    let charged = 0;
+    delayImpl = async (_ms, value, options) => {
+      await retryGates[delays.length - 1].promise;
+      options?.signal?.throwIfAborted();
+      return value!;
+    };
+    streamImpl = (model, input) => {
+      const index = batchIndex(input);
+      seen.push(`${index}:${model.id}`);
+      if (index === 0 && model.id === PRIMARY.id) return errStream("down");
+      return gatedStream(fallbackGate.promise, `summary-${index}`);
+    };
+    const work = summarizeBatches(batches(2), { ...distinctConfig, summarizerConcurrency: 1 }, makeCtx([]), {
+      controller: new FallbackController(), onUsage: () => charged++,
+    });
+    try {
+      for (let i = 0; i < 3; i++) {
+        await tick();
+        expect(seen).toEqual(Array(i + 1).fill(`0:${PRIMARY.id}`));
+        retryGates[i].release();
+      }
+      await tick();
+      expect(delays).toEqual([3000, 9000, 27000]);
+      expect(seen).toEqual([...Array(4).fill(`0:${PRIMARY.id}`), `0:${SESSION.id}`]);
+    } finally {
+      retryGates.forEach((g) => g.release());
+      fallbackGate.release();
+      await work;
+    }
+    expect((await work).map(text)).toEqual(["summary-0", "summary-1"]);
+    expect(seen.at(-1)).toBe(`1:${SESSION.id}`);
+    expect(charged).toBe(6);
+  });
+
+  it("cancellation during backoff never starts queued batches or another attempt", async () => {
+    delayImpl = (_ms, value, options) => realDelay(60_000, value, options);
+    const abort = new AbortController();
+    const started: number[] = [];
+    streamImpl = (_model, input) => { started.push(batchIndex(input)); return errStream("down"); };
+    const work = summarizeBatches(batches(4), distinctConfig, makeCtx([]), {
+      signal: abort.signal, controller: new FallbackController(),
+    }).catch((error) => error);
+    await tick();
+    abort.abort();
+    expect(await work).toBeInstanceOf(Error);
+    expect(started).toEqual([0, 1]);
+    expect(delays).toEqual([3000, 3000]);
+  });
+});
 
 describe("runSummarization wiring — same-model no-op (legacy path)", () => {
   it("summarizerModel=default: transient failure notifies error, returns transient, controller untouched", async () => {
