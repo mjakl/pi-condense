@@ -129,6 +129,8 @@ Set it from the slash command (saves immediately):
 
 Automatic flushes run at most `summarizerConcurrency` batch jobs at once (default `2`). Each job holds its slot through primary retries, backoff, and session-model fallback. A free slot takes the next batch; results are still published in input order after all jobs settle. This limits work within one extension session, not across Pi processes or other provider clients. More queued batches can increase flush latency; flush triggers, final-reply publication timing, and batch granularity are unchanged.
 
+Each batch or range-fusion job gets a fresh UUID passed as pi-ai's `sessionId`, separate from normal chat and other summary jobs, including jobs in other Pi processes. It stays stable through that job's primary retries and fallback. A later invocation, including a retry in a later flush, gets a new UUID. Manual and merged-batch summaries use the same rule. Providers control how this identity affects routing and caching; unsupported providers ignore it, and cache settings or explicit provider headers can suppress or override its wire representation. This does not guarantee gateway reliability or shared cache reuse between jobs.
+
 Set `contextPrune.summarizerConcurrency` in `<agent-dir>/settings.json`, then restart Pi or use `/reload`. No edit is needed for the default of 2. Cancellation, where the caller supplies a signal, stops queued dispatch and waits for started work to settle. Automatic lifecycle events do not gain a new cancellation mechanism.
 
 ### Summarizer timeouts

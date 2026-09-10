@@ -176,6 +176,85 @@ function gatedStream(wait: Promise<void>, summary: string) {
   };
 }
 
+describe("summary request identity", () => {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  it("isolates overlapping identical batches, separate contexts, and range jobs", async () => {
+    const wait = gate();
+    const identities: string[] = [];
+    streamImpl = (_model, _input, opts) => {
+      identities.push(opts.sessionId);
+      return gatedStream(wait.promise, "summary");
+    };
+    const ctx = makeCtx([]);
+    ctx.sessionManager = { getSessionId: () => "parent-session" };
+    const work = Promise.all([
+      summarizeBatches([makeBatch(), makeBatch()], DEFAULT_CONFIG, ctx),
+      summarizeBatch(makeBatch(), DEFAULT_CONFIG, makeCtx([])),
+      summarizeRange("t1: read source", DEFAULT_CONFIG, ctx),
+    ]);
+    try {
+      await tick();
+      expect(identities).toHaveLength(4);
+      for (const id of identities) expect(id).toMatch(uuid);
+      expect(new Set(identities).size).toBe(4);
+    } finally {
+      wait.release();
+      await work;
+    }
+  });
+
+  it("gives serial manual-style invocations fresh identities for merged batches", async () => {
+    const { groupBatchesByMode } = await import("./batch-capture.js");
+    const [merged] = groupBatchesByMode([
+      { ...makeBatch(), userTurnGroup: 1 },
+      { ...makeBatch(), userTurnGroup: 1 },
+    ], "agent-message");
+    expect(merged.toolCalls).toHaveLength(2);
+    const identities: string[] = [];
+    streamImpl = (_model, _input, opts) => {
+      identities.push(opts.sessionId);
+      return okStream("summary");
+    };
+    const ctx = makeCtx([]);
+    const options = { onTextProgress: () => {} };
+    for (let i = 0; i < 2; i++) {
+      expect((await summarizeBatch(merged, DEFAULT_CONFIG, ctx, options)).kind).toBe("ok");
+    }
+    for (const id of identities) expect(id).toMatch(uuid);
+    expect(new Set(identities).size).toBe(2);
+  });
+
+  it("keeps identity through retries and fallback, but renews for sticky and probe jobs", async () => {
+    let now = 0;
+    const controller = new FallbackController(() => now);
+    const calls: { model: string; sessionId: string }[] = [];
+    streamImpl = (model, _input, opts) => {
+      calls.push({ model: model.id, sessionId: opts.sessionId });
+      return model === PRIMARY ? errStream("offline outage") : okStream("fallback");
+    };
+    const ctx = makeCtx([]);
+    const options = { controller };
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, options)).kind).toBe("ok");
+    expect(calls.map(c => c.model)).toEqual([
+      PRIMARY.id, PRIMARY.id, PRIMARY.id, PRIMARY.id, SESSION.id,
+    ]);
+    expect(calls[0].sessionId).toMatch(uuid);
+    expect(new Set(calls.map(c => c.sessionId)).size).toBe(1);
+    expect(delays).toEqual([3000, 9000, 27000]);
+
+    expect((await summarizeBatch(makeBatch(), distinctConfig, ctx, options)).kind).toBe("ok");
+    expect(calls[5].model).toBe(SESSION.id);
+    now = COOLDOWN_MS;
+    expect((await summarizeRange("t1: read source", distinctConfig, ctx, options)).kind).toBe("ok");
+    expect(calls.slice(6).map(c => c.model)).toEqual([PRIMARY.id, SESSION.id]);
+    expect(calls[6].sessionId).toBe(calls[7].sessionId);
+    for (const index of [5, 6]) expect(calls[index].sessionId).toMatch(uuid);
+    expect(new Set([calls[0].sessionId, calls[5].sessionId, calls[6].sessionId]).size).toBe(3);
+    expect(options).toEqual({ controller });
+  });
+});
+
 describe("bounded automatic batch summarization", () => {
   it("defaults to two slots, refills on completion, and returns ordered results and progress indices", async () => {
     const gates = Array.from({ length: 5 }, gate);

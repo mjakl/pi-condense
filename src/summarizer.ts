@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
@@ -114,7 +115,8 @@ async function runOnce(
   userMessage: string,
   config: ContextPruneConfig,
   ctx: ExtensionContext,
-  options: SummarizeBatchOptions
+  options: SummarizeBatchOptions,
+  sessionId: string
 ): Promise<SummarizeOutcome> {
   options.signal?.throwIfAborted();
   const context = {
@@ -174,6 +176,7 @@ async function runOnce(
       {
         apiKey: auth.apiKey,
         headers: auth.headers,
+        sessionId,
         signal: combineSignals(options.signal, timeoutController.signal),
         ...summarizerThinkingOptions(config),
       }
@@ -278,6 +281,8 @@ async function runSummarization(
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarize: aborted before start");
 
+  // Isolate independent jobs from each other and chat; retain affinity on retries/fallback.
+  const sessionId = randomUUID();
   const primary = resolveModel(config, ctx);
   const controller = options.controller;
   const sessionModel = ctx.model;
@@ -292,7 +297,7 @@ async function runSummarization(
 
   // No controller or no distinct fallback: single attempt, legacy behavior.
   if (!controller || !FallbackController.hasDistinctFallback(primary, sessionModel)) {
-    const r = await runOnce(primary, userMessage, config, ctx, options);
+    const r = await runOnce(primary, userMessage, config, ctx, options, sessionId);
     if (r.kind === "auth" || r.kind === "transient") notifyFailure(r);
     return r;
   }
@@ -309,13 +314,13 @@ async function runSummarization(
   const decision = controller.chooseTarget();
   const fallbackConfig = { ...config, summarizerThinking: "default" as const };
   const model = decision.target === "primary" ? primary : sessionModel;
-  let r = await runOnce(model, userMessage, decision.target === "primary" ? config : fallbackConfig, ctx, options);
+  let r = await runOnce(model, userMessage, decision.target === "primary" ? config : fallbackConfig, ctx, options, sessionId);
   // Cooldown probes stay single-shot; only initial primary calls get retries.
   if (decision.target === "primary" && !decision.wasProbe) {
     for (const delayMs of [3000, 9000, 27000]) {
       if (r.kind !== "transient") break;
       await delay(delayMs, undefined, { signal: options.signal });
-      r = await runOnce(primary, userMessage, config, ctx, options);
+      r = await runOnce(primary, userMessage, config, ctx, options, sessionId);
     }
   }
 
@@ -336,7 +341,7 @@ async function runSummarization(
         return r;
       }
       // Primary retries exhausted (or single probe failed): one fallback attempt.
-      const r2 = await runOnce(sessionModel, userMessage, fallbackConfig, ctx, options);
+      const r2 = await runOnce(sessionModel, userMessage, fallbackConfig, ctx, options, sessionId);
       if (r2.kind === "ok") {
         emit(controller.onPrimaryFailFallbackOk(decision.wasProbe));
         return r2; // suppress the legacy error notify — fallback rescued the call
