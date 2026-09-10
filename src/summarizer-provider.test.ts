@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import { fileURLToPath } from "node:url";
 
 it("forwards distinct identities through overlapping real Responses requests (offline)", async () => {
   const child = Bun.spawn([process.execPath, "--eval", `
@@ -41,7 +42,7 @@ it("forwards distinct identities through overlapping real Responses requests (of
       ...DEFAULT_CONFIG, summarizerModel: "default", summarizerThinking: "off",
     }, ctx);
     console.log(JSON.stringify({ requests, results }));
-  `], { cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe",
+  `], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdout: "pipe", stderr: "pipe",
     env: { ...process.env, PI_CACHE_RETENTION: "short" }, timeout: 4000 });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
@@ -111,7 +112,7 @@ it("sends high thinking through the real Anthropic adapter with resolved auth (o
     const fullResult = await summarizeBatch(batch, { ...DEFAULT_CONFIG, summarizerModel: "default", summarizerThinking: "off" }, ctx);
     const tooLarge = await summarizeBatch(batch, { ...DEFAULT_CONFIG, summarizerModel: "default" }, { ...ctx, model: { ...model, contextWindow: 100 } });
     console.log(JSON.stringify({ requests, results, raw, fullResult, tooLarge, notices }));
-  `], { cwd: new URL("..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" });
+  `], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
   ]);
